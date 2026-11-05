@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "qpane",
+  "productName": "qpanes",
   "version": "0.1.0",
-  "identifier": "io.qpane.app",
+  "identifier": "io.qpanes.app",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
@@ -12,9 +12,12 @@
   "app": {
     "windows": [
       {
-        "title": "qpane",
-        "width": 800,
-        "height": 600
+        "title": "QPanes",
+        "width": 1200,
+        "height": 780,
+        "minWidth": 720,
+        "minHeight": 420,
+        "backgroundColor": "#101317"
       }
     ],
     "security": {

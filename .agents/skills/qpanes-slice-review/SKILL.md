@@ -1,9 +1,9 @@
 ---
-name: qpane-slice-review
-description: Verify a QPane desktop-app implementation slice before marking a Codex GOAL complete or merging. Use after implementation or when asked for a QPane quality gate, acceptance review, or cross-platform risk assessment; do not use for initial brainstorming.
+name: qpanes-slice-review
+description: Verify a QPanes desktop-app implementation slice before marking a Codex GOAL complete or merging. Use after implementation or when asked for a QPanes quality gate, acceptance review, or cross-platform risk assessment; do not use for initial brainstorming.
 ---
 
-# QPane slice quality gate
+# QPanes slice quality gate
 
 1. Read root `AGENTS.md`, `docs/PRODUCT.md`, `docs/ARCHITECTURE.md`, and the current slice specification. Extract each acceptance criterion.
 2. Inspect the diff against the approved plan, and flag out-of-scope code or excessive dependencies.

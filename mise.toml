@@ -12,14 +12,18 @@ run = "pnpm tauri dev"
 description = "Build the Svelte frontend"
 run = "pnpm build"
 
+[tasks.ui-check]
+description = "Check Svelte and TypeScript"
+run = "pnpm check"
+
 [tasks.rust-fmt]
 description = "Verify Rust formatting"
-run = "cargo fmt --manifest-path src-tauri/Cargo.toml -- --check"
+run = ["cargo fmt --manifest-path crates/qpanes-core/Cargo.toml -- --check", "cargo fmt --manifest-path src-tauri/Cargo.toml -- --check"]
 
 [tasks.rust-clippy]
 description = "Verify Rust linting"
-run = "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings"
+run = ["cargo clippy --manifest-path crates/qpanes-core/Cargo.toml --all-targets -- -D warnings", "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings"]
 
 [tasks.rust-test]
 description = "Run Rust tests"
-run = "cargo test --manifest-path src-tauri/Cargo.toml"
+run = ["cargo test --manifest-path crates/qpanes-core/Cargo.toml", "cargo test --manifest-path src-tauri/Cargo.toml"]

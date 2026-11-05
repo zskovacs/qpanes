@@ -1,4 +1,4 @@
-# QPane roadmap
+# QPanes roadmap
 
 Every slice needs an approved spec, a testable finish line, and a short recorded verification report. Only one write-heavy GOAL should touch a given worktree at a time.
 

@@ -1,6 +1,6 @@
-# QPane — Coding agent instructions
+# QPanes — Coding agent instructions
 
-QPane is a lightweight, keyboard-first, cross-platform, dual-pane desktop file manager inspired by the workflows of Total Commander. It is an independent implementation, not a reverse-engineered or copied version.
+QPanes is a lightweight, keyboard-first, cross-platform, dual-pane desktop file manager inspired by the workflows of Total Commander. It is an independent implementation, not a reverse-engineered or copied version.
 
 ## Stack and source of truth
 

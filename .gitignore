@@ -1,0 +1,55 @@
+# Dependencies and generated frontend output
+node_modules/
+.pnpm-store/
+/build/
+/.svelte-kit/
+/package/
+.vite/
+.cache/
+*.tsbuildinfo
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+
+# Rust build output (including future workspace crates)
+target/
+
+# Local environment, credentials, and tool configuration
+.env
+.env.*
+!.env.example
+!.env.*.example
+.envrc
+/.aws/
+/.ssh/
+/.codex/
+*.pem
+*.key
+*.p12
+*.pfx
+mise.local.toml
+mise.*.local.toml
+.mise.local.toml
+.mise.*.local.toml
+
+# Logs, test reports, and browser automation state
+*.log
+coverage/
+playwright-report/
+test-results/
+.playwright-cli/
+
+# Keep shared VS Code settings, ignore personal workspace state
+/.vscode/*
+!/.vscode/extensions.json
+!/.vscode/settings.json
+.idea/
+*.code-workspace
+*.swp
+*.swo
+*~
+
+# Operating system metadata
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini

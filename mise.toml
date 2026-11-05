@@ -1,0 +1,25 @@
+# Revisit versions with `mise` when you have settled on a release toolchain.
+[tools]
+rust = "stable"
+node = "lts"
+pnpm = "latest"
+
+[tasks.dev]
+description = "Run the Linux Tauri app under WSLg"
+run = "pnpm tauri dev"
+
+[tasks.ui-build]
+description = "Build the Svelte frontend"
+run = "pnpm build"
+
+[tasks.rust-fmt]
+description = "Verify Rust formatting"
+run = "cargo fmt --manifest-path src-tauri/Cargo.toml -- --check"
+
+[tasks.rust-clippy]
+description = "Verify Rust linting"
+run = "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings"
+
+[tasks.rust-test]
+description = "Run Rust tests"
+run = "cargo test --manifest-path src-tauri/Cargo.toml"

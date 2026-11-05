@@ -18,7 +18,12 @@ async (page) => {
     window.isTauri = true;
     window.ipcRequests = [];
     window.__TAURI_INTERNALS__ = {
+      metadata: { currentWindow: { label: 'main' } },
+      transformCallback: () => 0,
+      unregisterCallback: () => {},
       invoke: async (command, payload) => {
+        if (command.startsWith('plugin:window|')) return command.endsWith('|scale_factor') ? 1 : false;
+        if (command.startsWith('plugin:event|')) return 1;
         if (!['list_directory', 'sort_directory_entries'].includes(command)) throw new Error(`Unexpected command ${command}`);
         const request = command === 'list_directory' ? payload.request : payload;
         window.ipcRequests.push(request);

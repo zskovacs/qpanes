@@ -16,6 +16,10 @@ run = "pnpm build"
 description = "Check Svelte and TypeScript"
 run = "pnpm check"
 
+[tasks.ui-test]
+description = "Test window state, DPI observations and platform configuration"
+run = "node --test tests/window-state.test.mjs"
+
 [tasks.rust-fmt]
 description = "Verify Rust formatting"
 run = ["cargo fmt --manifest-path crates/qpanes-core/Cargo.toml -- --check", "cargo fmt --manifest-path src-tauri/Cargo.toml -- --check"]

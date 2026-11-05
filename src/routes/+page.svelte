@@ -1,7 +1,7 @@
 <script lang="ts">
   import { afterNavigate } from '$app/navigation';
   import FilePane from '$lib/FilePane.svelte';
-  import Icon from '$lib/Icon.svelte';
+  import WindowHeader from '$lib/WindowHeader.svelte';
   import '$lib/app.css';
   let active = $state<'left' | 'right'>('left');
   let split = $state(50);
@@ -31,13 +31,10 @@
     if (event.key === 'Home') { event.preventDefault(); split = 50; }
   }
 </script>
-<svelte:head><title>QPanes · Local files</title><meta name="description" content="A fast, keyboard-first dual-pane file manager." /></svelte:head>
+<svelte:head><title>Qpanes · Local files</title><meta name="description" content="A fast, keyboard-first dual-pane file manager." /></svelte:head>
 <svelte:window onkeydown={keyboard} onpointermove={resize} onpointerup={() => { resizing = false; }} onpointercancel={() => { resizing = false; }} />
 <main class={{ resizing }}>
-  <header class="app-header">
-    <div class="brand"><span class="brand-mark"><Icon name="panels" size={20} /></span><h1>QPanes</h1><span class="brand-divider"></span><span class="workspace-title">Local files</span></div>
-    <span class="read-only"><Icon name="lock" size={12} />Read-only workspace</span>
-  </header>
+  <WindowHeader onreturnfocus={() => (active === 'left' ? left : right).focusList()} />
   <div class="workspace-intro"><div><span class="eyebrow">WORKSPACE</span><span class="intro-description">Two panels. One flow.</span></div><span class="navigation-hint">Browse with your keyboard<span>↑ ↓</span></span></div>
   <div class="workspace" bind:this={workspace} style:--split={`${split}%`}>
     <FilePane side="left" active={active === 'left'} bind:this={left} onactivate={() => { active = 'left'; }} onswitch={switchPane} />
@@ -49,13 +46,6 @@
 </main>
 <style>
   main { height: 100dvh; min-height: 320px; display: flex; flex-direction: column; }
-  .app-header { height: 61px; flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 0 23px; border-bottom: 1px solid var(--border); background: var(--surface); }
-  .brand { display: flex; align-items: center; gap: 11px; }
-  .brand-mark { color: var(--accent); display: grid; place-items: center; width: 29px; height: 29px; background: var(--selection); border: 1px solid var(--active-border); border-radius: 7px; }
-  h1 { font-size: 17px; font-weight: 650; letter-spacing: -.5px; margin: 0; }
-  .brand-divider { height: 17px; width: 1px; background: var(--border); margin: 0 5px 0 8px; }
-  .workspace-title { font-size: 12px; color: var(--secondary); }
-  .read-only { display: flex; gap: 7px; align-items: center; color: var(--secondary); background: var(--surface-raised); border: 1px solid var(--border); border-radius: 20px; padding: 5px 9px; font-size: 10px; }
   .workspace-intro { height: 59px; display: flex; align-items: center; justify-content: space-between; padding: 0 24px; flex-shrink: 0; }
   .workspace-intro > div { display: flex; align-items: center; gap: 15px; }
   .eyebrow { font-size: 9px; color: var(--secondary); letter-spacing: .12em; font-weight: 600; }
@@ -73,5 +63,5 @@
   kbd { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 19px; padding: 0 4px; border: 1px solid var(--border); border-radius: 3px; color: var(--secondary); background: var(--surface-raised); font: 9px var(--mono); }
   .local-status { white-space: nowrap; display: flex; align-items: center; gap: 6px; }
   .local-status > span { width: 5px; height: 5px; background: var(--accent); border-radius: 50%; }
-  @media (max-width: 850px) { .path-shortcut, .local-status, .navigation-hint { display: none; } .app-header { padding: 0 16px; } .workspace { margin: 0 10px; } .workspace-intro { padding: 0 16px; } .shortcuts { gap: 12px; } }
+  @media (max-width: 850px) { .path-shortcut, .local-status, .navigation-hint { display: none; } .workspace { margin: 0 10px; } .workspace-intro { padding: 0 16px; } .shortcuts { gap: 12px; } }
 </style>

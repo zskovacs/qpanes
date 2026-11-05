@@ -37,7 +37,13 @@ async (page) => {
     });
     const hold = (path) => new Promise((resolve) => c.pending.push({ path, resolve }));
     window.isTauri = true;
-    window.__TAURI_INTERNALS__ = { invoke: async (command, payload) => {
+    window.__TAURI_INTERNALS__ = {
+      metadata: { currentWindow: { label: 'main' } },
+      transformCallback: () => 0,
+      unregisterCallback: () => {},
+      invoke: async (command, payload) => {
+      if (command.startsWith('plugin:window|')) return command.endsWith('|scale_factor') ? 1 : false;
+      if (command.startsWith('plugin:event|')) return 1;
       const request = command === 'list_directory' ? payload.request : payload;
       c.requests.push({ command, ...request });
       if (command === 'sort_directory_entries') {

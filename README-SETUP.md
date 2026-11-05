@@ -1,13 +1,13 @@
-# QPane Codex starter kit
+# QPanes Codex starter kit
 
 These files are intended to be copied into the ROOT of an ALREADY GENERATED Tauri + Svelte project. They contain no application code and do not presume access to your local repository.
 
 ## Copy safely
 
 1. Download the ZIP and copy it to the host or WSL filesystem.
-2. At your QPane repository root, extract without overwriting existing files:
+2. At your QPanes repository root, extract without overwriting existing files:
 
-   unzip -n /path/to/qpane-codex-kit.zip -d .
+   unzip -n /path/to/qpanes-codex-kit.zip -d .
 
 3. Inspect the files before trusting the repository with Codex. If you already have an AGENTS.md, mise.toml or `.codex/config.toml`, manually merge them rather than overwriting.
 4. If you already created a `mise.toml` or other project toolchain file, compare versions and tasks before adopting this one.
@@ -34,7 +34,7 @@ You may need Tauri's Linux system dependencies (WebKitGTK 4.1 etc.) before `mise
 
 ## First Codex pass: project reconnaissance (normal prompt, NOT GOAL)
 
-Inspect the generated project and all QPane instruction/docs files. Verify which Svelte/SvelteKit setup the scaffold actually generated, the package scripts, Tauri app identifier, pnpm and Rust toolchains, and that mise tasks match the installed project. Identify platform-specific blockers under WSLg. Do not implement product features or migrate frameworks. Make minimal corrections to the setup files, document verified results, then stop.
+Inspect the generated project and all QPanes instruction/docs files. Verify which Svelte/SvelteKit setup the scaffold actually generated, the package scripts, Tauri app identifier, pnpm and Rust toolchains, and that mise tasks match the installed project. Identify platform-specific blockers under WSLg. Do not implement product features or migrate frameworks. Make minimal corrections to the setup files, document verified results, then stop.
 
 ## Second Codex pass: design (normal prompt, NOT GOAL)
 

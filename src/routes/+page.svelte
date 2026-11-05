@@ -1,156 +1,77 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
-
-  let name = $state("");
-  let greetMsg = $state("");
-
-  async function greet(event: Event) {
-    event.preventDefault();
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    greetMsg = await invoke("greet", { name });
+  import { afterNavigate } from '$app/navigation';
+  import FilePane from '$lib/FilePane.svelte';
+  import Icon from '$lib/Icon.svelte';
+  import '$lib/app.css';
+  let active = $state<'left' | 'right'>('left');
+  let split = $state(50);
+  let resizing = $state(false);
+  let workspace: HTMLDivElement;
+  let left: FilePane;
+  let right: FilePane;
+  afterNavigate(() => { left.focusList(); });
+  function switchPane() {
+    active = active === 'left' ? 'right' : 'left';
+    (active === 'left' ? left : right).focusList();
+  }
+  function keyboard(event: KeyboardEvent) {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'l') {
+      event.preventDefault();
+      (active === 'left' ? left : right).editPath();
+    }
+  }
+  function resize(event: PointerEvent) {
+    if (!resizing) return;
+    const bounds = workspace.getBoundingClientRect();
+    split = Math.max(30, Math.min(70, (event.clientX - bounds.left) / bounds.width * 100));
+  }
+  function resizeKey(event: KeyboardEvent) {
+    const delta = event.key === 'ArrowLeft' ? -2 : event.key === 'ArrowRight' ? 2 : 0;
+    if (delta) { event.preventDefault(); split = Math.max(30, Math.min(70, split + delta)); }
+    if (event.key === 'Home') { event.preventDefault(); split = 50; }
   }
 </script>
-
-<main class="container">
-  <h1>Welcome to Tauri + Svelte</h1>
-
-  <div class="row">
-    <a href="https://vite.dev" target="_blank">
-      <img src="/vite.svg" class="logo vite" alt="Vite Logo" />
-    </a>
-    <a href="https://tauri.app" target="_blank">
-      <img src="/tauri.svg" class="logo tauri" alt="Tauri Logo" />
-    </a>
-    <a href="https://svelte.dev" target="_blank">
-      <img src="/svelte.svg" class="logo svelte-kit" alt="SvelteKit Logo" />
-    </a>
+<svelte:head><title>QPanes · Local files</title><meta name="description" content="A fast, keyboard-first dual-pane file manager." /></svelte:head>
+<svelte:window onkeydown={keyboard} onpointermove={resize} onpointerup={() => { resizing = false; }} onpointercancel={() => { resizing = false; }} />
+<main class={{ resizing }}>
+  <header class="app-header">
+    <div class="brand"><span class="brand-mark"><Icon name="panels" size={20} /></span><h1>QPanes</h1><span class="brand-divider"></span><span class="workspace-title">Local files</span></div>
+    <span class="read-only"><Icon name="lock" size={12} />Read-only workspace</span>
+  </header>
+  <div class="workspace-intro"><div><span class="eyebrow">WORKSPACE</span><span class="intro-description">Two panels. One flow.</span></div><span class="navigation-hint">Browse with your keyboard<span>↑ ↓</span></span></div>
+  <div class="workspace" bind:this={workspace} style:--split={`${split}%`}>
+    <FilePane side="left" active={active === 'left'} bind:this={left} onactivate={() => { active = 'left'; }} onswitch={switchPane} />
+    <div class="splitter" role="slider" aria-label="Resize panels" aria-orientation="horizontal" aria-valuemin="30" aria-valuemax="70" aria-valuenow={Math.round(split)} aria-valuetext={`Left panel ${Math.round(split)} percent`} tabindex="0" onkeydown={resizeKey}
+      onpointerdown={(event) => { resizing = true; event.currentTarget.setPointerCapture(event.pointerId); event.currentTarget.focus(); }} ondblclick={() => { split = 50; }}><span></span></div>
+    <FilePane side="right" active={active === 'right'} bind:this={right} onactivate={() => { active = 'right'; }} onswitch={switchPane} />
   </div>
-  <p>Click on the Tauri, Vite, and SvelteKit logos to learn more.</p>
-
-  <form class="row" onsubmit={greet}>
-    <input id="greet-input" placeholder="Enter a name..." bind:value={name} />
-    <button type="submit">Greet</button>
-  </form>
-  <p>{greetMsg}</p>
+  <footer class="app-footer"><div class="shortcuts"><span><kbd>Tab</kbd>Switch panel</span><span><kbd>↑</kbd><kbd>↓</kbd>Select</span><span><kbd>Enter</kbd>Open folder</span><span><kbd>⌫</kbd>Parent</span><span class="path-shortcut"><kbd>Ctrl / ⌘ L</kbd>Edit path</span></div><span class="local-status"><span></span>Local filesystem</span></footer>
 </main>
-
 <style>
-.logo.vite:hover {
-  filter: drop-shadow(0 0 2em #747bff);
-}
-
-.logo.svelte-kit:hover {
-  filter: drop-shadow(0 0 2em #ff3e00);
-}
-
-:root {
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
-  font-size: 16px;
-  line-height: 24px;
-  font-weight: 400;
-
-  color: #0f0f0f;
-  background-color: #f6f6f6;
-
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
-}
-
-.container {
-  margin: 0;
-  padding-top: 10vh;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  text-align: center;
-}
-
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: 0.75s;
-}
-
-.logo.tauri:hover {
-  filter: drop-shadow(0 0 2em #24c8db);
-}
-
-.row {
-  display: flex;
-  justify-content: center;
-}
-
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-
-a:hover {
-  color: #535bf2;
-}
-
-h1 {
-  text-align: center;
-}
-
-input,
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  color: #0f0f0f;
-  background-color: #ffffff;
-  transition: border-color 0.25s;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
-}
-
-button {
-  cursor: pointer;
-}
-
-button:hover {
-  border-color: #396cd8;
-}
-button:active {
-  border-color: #396cd8;
-  background-color: #e8e8e8;
-}
-
-input,
-button {
-  outline: none;
-}
-
-#greet-input {
-  margin-right: 5px;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #f6f6f6;
-    background-color: #2f2f2f;
-  }
-
-  a:hover {
-    color: #24c8db;
-  }
-
-  input,
-  button {
-    color: #ffffff;
-    background-color: #0f0f0f98;
-  }
-  button:active {
-    background-color: #0f0f0f69;
-  }
-}
-
+  main { height: 100dvh; min-height: 320px; display: flex; flex-direction: column; }
+  .app-header { height: 61px; flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 0 23px; border-bottom: 1px solid var(--border); background: var(--surface); }
+  .brand { display: flex; align-items: center; gap: 11px; }
+  .brand-mark { color: var(--accent); display: grid; place-items: center; width: 29px; height: 29px; background: var(--selection); border: 1px solid var(--active-border); border-radius: 7px; }
+  h1 { font-size: 17px; font-weight: 650; letter-spacing: -.5px; margin: 0; }
+  .brand-divider { height: 17px; width: 1px; background: var(--border); margin: 0 5px 0 8px; }
+  .workspace-title { font-size: 12px; color: var(--secondary); }
+  .read-only { display: flex; gap: 7px; align-items: center; color: var(--secondary); background: var(--surface-raised); border: 1px solid var(--border); border-radius: 20px; padding: 5px 9px; font-size: 10px; }
+  .workspace-intro { height: 59px; display: flex; align-items: center; justify-content: space-between; padding: 0 24px; flex-shrink: 0; }
+  .workspace-intro > div { display: flex; align-items: center; gap: 15px; }
+  .eyebrow { font-size: 9px; color: var(--secondary); letter-spacing: .12em; font-weight: 600; }
+  .intro-description { font-size: 11px; color: var(--muted); }
+  .navigation-hint { font-size: 10px; color: var(--muted); display: flex; align-items: center; gap: 9px; }
+  .navigation-hint > span { letter-spacing: 3px; }
+  .workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, var(--split)) 9px minmax(0, 1fr); margin: 0 17px; }
+  .splitter { display: grid; place-items: center; cursor: col-resize; outline-offset: -1px; touch-action: none; }
+  .splitter > span { width: 2px; height: 30px; border-radius: 2px; background: var(--border); }
+  .splitter:hover > span, .splitter:focus-visible > span, .resizing .splitter > span { background: var(--accent); }
+  .resizing { cursor: col-resize; user-select: none; }
+  .app-footer { height: 44px; flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 0 22px; font-size: 10px; color: var(--muted); }
+  .shortcuts { display: flex; align-items: center; gap: 17px; }
+  .shortcuts > span { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+  kbd { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 19px; padding: 0 4px; border: 1px solid var(--border); border-radius: 3px; color: var(--secondary); background: var(--surface-raised); font: 9px var(--mono); }
+  .local-status { white-space: nowrap; display: flex; align-items: center; gap: 6px; }
+  .local-status > span { width: 5px; height: 5px; background: var(--accent); border-radius: 50%; }
+  @media (max-width: 850px) { .path-shortcut, .local-status, .navigation-hint { display: none; } .app-header { padding: 0 16px; } .workspace { margin: 0 10px; } .workspace-intro { padding: 0 16px; } .shortcuts { gap: 12px; } }
 </style>

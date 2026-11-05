@@ -2634,14 +2634,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "qpane"
+name = "qpanes"
 version = "0.1.0"
 dependencies = [
+ "qpanes-core",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
+]
+
+[[package]]
+name = "qpanes-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

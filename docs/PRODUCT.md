@@ -1,4 +1,4 @@
-# QPane — Product definition (v0)
+# QPanes — Product definition (v0)
 
 ## Vision
 A fast, minimal, keyboard-first, cross-platform dual-pane file manager for developers and power users. Modern desktop UX without giving up precise filesystem controls.

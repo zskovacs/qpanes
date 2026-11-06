@@ -42,7 +42,7 @@
 
 <header class={['app-header', { macos }]} data-tauri-drag-region={native ? '' : undefined}>
   <div class="brand"><span class="brand-mark"><Icon name="panels" size={20} /></span><h1>Qpanes</h1><span class="brand-divider"></span><span class="workspace-title">Local files</span></div>
-  <span class="read-only"><Icon name="lock" size={12} />Read-only workspace</span>
+  <span class="read-only"><Icon name="lock" size={12} />Local workspace</span>
   {#if native && !macos}
     <div class="window-controls" role="group" aria-label="Window controls">
       <button type="button" aria-label="Minimize window" title="Minimize" onmousedown={keepFocus} onkeydown={returnFocus} onclick={() => action('minimize')}><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M1 6.5h10" /></svg></button>

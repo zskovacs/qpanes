@@ -1,7 +1,16 @@
+<script module lang="ts">
+  import type { FileEntry, NativePath } from './filesystem';
+  export interface PaneSnapshot {
+    path: NativePath;
+    label: string;
+    revision: number;
+    entry: FileEntry | null;
+  }
+</script>
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import Icon from './Icon.svelte';
-  import { listDirectory, sortDirectoryEntries, filesystemError, type DirectoryListing, type DirectoryTarget, type FileEntry, type FilesystemError, type NativePath, type SortKey, type SortDirection } from './filesystem';
+  import { listDirectory, sortDirectoryEntries, filesystemError, type DirectoryListing, type DirectoryTarget, type FilesystemError, type SortKey, type SortDirection } from './filesystem';
   import { formatDate, formatSize, kindLabel } from './format';
 
   let { side, active, onactivate, onswitch }: {
@@ -24,6 +33,7 @@
   let detailsSummary: HTMLElement;
   let errorSummary = $state<HTMLElement>();
   let sequence = 0;
+  let navigationRevision = 0;
   let draftRevision = 0;
   let editingPath = false;
   type NavigationIntent = { target: DirectoryTarget; selection?: string };
@@ -56,6 +66,18 @@
   export function focusList() { listElement?.focus(); }
   export function editPath() { pathInput?.focus(); pathInput?.select(); }
 
+  /** A parent action has no FileEntry and cannot enter an operation request. */
+  export function operationSnapshot(): PaneSnapshot | null {
+    if (!listing || loading || error || editingPath) return null;
+    return { path: listing.path, label: listing.label, revision: navigationRevision, entry: selectedEntry ?? null };
+  }
+
+  /** Never let an operation completion navigate back over newer user intent. */
+  export function refreshAfterOperation(snapshot: PaneSnapshot, selection?: NativePath | null) {
+    if (!listing || snapshot.revision !== navigationRevision || snapshot.path !== listing.path) return;
+    void navigate({ kind: 'path', value: listing.path }, selection ? entryKey(selection) : selected?.key);
+  }
+
   async function commitListing(result: DirectoryListing, request: number, selection?: string, pathRevision?: number) {
     // Sort preferences may change repeatedly while either IPC operation is pending.
     // Keep the destination and sort the returned data, never re-read the old path.
@@ -85,6 +107,7 @@
   }
 
   async function navigate(target: DirectoryTarget, selection?: string) {
+    navigationRevision++;
     const request = ++sequence;
     const pathRevision = draftRevision;
     // The displayed selection may belong to a different directory after failure.
@@ -164,7 +187,7 @@
     if (loading || !selected) return;
     if (selected.kind === 'parent') parent();
     else if (selected.entry.kind === 'directory') void navigate({ kind: 'path', value: selected.entry.path });
-    else note = selected.entry.kind === 'symlink' ? 'Links are shown without following their targets.' : 'Read-only browsing · select a folder to open it.';
+    else note = selected.entry.kind === 'symlink' ? 'Links are shown without following their targets.' : 'Select a folder to open it.';
   }
 
   function parent() {

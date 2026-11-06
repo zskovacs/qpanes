@@ -8,6 +8,12 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+mod operations;
+pub use operations::{
+    CreateDirectoryRequest, OperationResult, RenameRequest, TransferRequest, TrashRequest,
+    copy_entry, create_directory, move_entry, rename_entry, trash_entry,
+};
+
 /// Lossless native path. Display labels must never be used as path identifiers.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -151,6 +157,9 @@ pub struct Entry {
     pub size: Option<u64>,
     pub modified_ms: Option<i64>,
     pub metadata_error: Option<String>,
+    /// Native file identity captured at listing time, never a display label.
+    #[serde(default)]
+    pub identity: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -174,6 +183,16 @@ pub enum ErrorCode {
     InvalidPath,
     Io,
     Unavailable,
+    Conflict,
+    InvalidName,
+    SameEntry,
+    Descendant,
+    UnsupportedEntry,
+    #[serde(rename = "cross_device_not_supported")]
+    CrossDeviceNotSupported,
+    UnsupportedPlatform,
+    SourceChanged,
+    TrashFailed,
 }
 
 #[derive(Debug, Serialize)]
@@ -198,12 +217,22 @@ impl FsError {
         }
     }
 
+    pub fn operation_unavailable() -> Self {
+        Self {
+            code: ErrorCode::Unavailable,
+            message: "The filesystem worker stopped before reporting the result. Inspect the source, destination and Trash before attempting another operation.".into(),
+        }
+    }
+
     fn from_io(error: io::Error) -> Self {
         let code = match error.kind() {
             io::ErrorKind::NotFound => ErrorCode::NotFound,
             io::ErrorKind::PermissionDenied => ErrorCode::PermissionDenied,
             io::ErrorKind::NotADirectory => ErrorCode::NotDirectory,
             io::ErrorKind::InvalidInput => ErrorCode::InvalidPath,
+            io::ErrorKind::AlreadyExists => ErrorCode::Conflict,
+            io::ErrorKind::InvalidFilename => ErrorCode::InvalidName,
+            io::ErrorKind::CrossesDevices => ErrorCode::CrossDeviceNotSupported,
             _ => ErrorCode::Io,
         };
         Self {
@@ -271,9 +300,11 @@ fn read_entry(path: PathBuf, name: String) -> Entry {
         size: None,
         modified_ms: None,
         metadata_error: None,
+        identity: None,
     };
-    match fs::symlink_metadata(path) {
+    match fs::symlink_metadata(&path) {
         Ok(metadata) => {
+            entry.identity = operations::listing_identity(&path, &metadata);
             let kind = metadata.file_type();
             entry.kind = if kind.is_symlink() {
                 EntryKind::Symlink

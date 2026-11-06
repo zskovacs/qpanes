@@ -9,6 +9,7 @@ export type EntryKind = 'directory' | 'file' | 'symlink' | 'other' | 'unknown';
 export interface FileEntry {
   path: NativePath; name: string; kind: EntryKind;
   size: number | null; modifiedMs: number | null; metadataError: string | null;
+  identity?: string | null;
 }
 export interface ListRequest { target: DirectoryTarget; sort: SortKey; direction: SortDirection }
 export interface DirectoryListing {
@@ -16,6 +17,11 @@ export interface DirectoryListing {
   entries: FileEntry[]; warnings: string[]; sort: SortKey; direction: SortDirection;
 }
 export interface FilesystemError { code: string; message: string }
+export interface CreateDirectoryRequest { parent: NativePath; name: string }
+export interface RenameRequest { source: FileEntry; name: string }
+export interface TransferRequest { source: FileEntry; destination: NativePath }
+export interface TrashRequest { source: FileEntry }
+export interface OperationResult { path: NativePath | null; warnings: string[] }
 
 export function listDirectory(request: ListRequest): Promise<DirectoryListing> {
   if (!isTauri()) {
@@ -27,6 +33,26 @@ export function listDirectory(request: ListRequest): Promise<DirectoryListing> {
 /** Pure Rust sorting of real entries only; virtual navigation rows stay in the UI. */
 export function sortDirectoryEntries(entries: FileEntry[], sort: SortKey, direction: SortDirection): Promise<FileEntry[]> {
   return invoke<FileEntry[]>('sort_directory_entries', { entries, sort, direction });
+}
+
+export function createDirectory(request: CreateDirectoryRequest): Promise<OperationResult> {
+  return invoke<OperationResult>('create_directory', { request });
+}
+
+export function renameEntry(request: RenameRequest): Promise<OperationResult> {
+  return invoke<OperationResult>('rename_entry', { request });
+}
+
+export function copyEntry(request: TransferRequest): Promise<OperationResult> {
+  return invoke<OperationResult>('copy_entry', { request });
+}
+
+export function moveEntry(request: TransferRequest): Promise<OperationResult> {
+  return invoke<OperationResult>('move_entry', { request });
+}
+
+export function trashEntry(request: TrashRequest): Promise<OperationResult> {
+  return invoke<OperationResult>('trash_entry', { request });
 }
 
 export function filesystemError(value: unknown): FilesystemError {

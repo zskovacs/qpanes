@@ -30,7 +30,12 @@ Commit source files, documentation, shared settings, and both `pnpm-lock.yaml` a
 files, and browser test artifacts are ignored. Only placeholder values belong in
 tracked `.env.example` or `.env.*.example` files.
 
-Project instructions and skills in `AGENTS.md` and `.agents/` are shared. Local
-Codex configuration in `.codex/` stays on the developer's machine.
+Project instructions and skills in `AGENTS.md` and `.agents/` are shared.
+Claude Code loads the same policy through `CLAUDE.md` and discovers skill
+entrypoints in `.claude/skills/`. Use the official Svelte plugin and the Context7
+and Playwright CLIs with their skills. See
+[agent setup](README-SETUP.md) for first-run checks and external plugins.
+Local Codex configuration in `.codex/` and Claude overrides in
+`.claude/settings.local.json` and `CLAUDE.local.md` stay on the developer's machine.
 `.gitattributes` keeps text line endings consistent across platforms, and
 `.editorconfig` defines the common editor defaults.

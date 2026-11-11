@@ -1,4 +1,63 @@
-# QPanes Codex starter kit
+# QPanes agent setup — Codex and Claude Code
+
+For an existing checkout, use the agent setup below. The starter-kit extraction
+instructions apply only when bootstrapping another generated project.
+
+## Claude Code
+
+Start `claude` in the repository root after installing the project toolchains.
+`CLAUDE.md` imports the shared `AGENTS.md`; `.claude/skills/` exposes the three
+repository skills without symlinks or duplicate workflow bodies. Relative links
+in a shared skill resolve from its `.agents/skills/<name>/` directory.
+
+Install the official Svelte plugin inside a Claude session:
+
+```text
+/plugin marketplace add sveltejs/ai-tools
+/plugin install svelte
+```
+
+The plugin supplies Svelte documentation, skills, the autofixer and a specialized
+editing agent. Use Context7 and Playwright through their CLIs and skills. For
+Context7 authentication or quota limits, use `ctx7 login`; keep credentials in
+the CLI's local configuration.
+
+The repository skills should appear as `/playwright-cli`, `/qpanes-slice-review`
+and `/web-design-guidelines` in Claude's command menu. Restart an existing session
+after adding these files so its project instructions and tools are reloaded.
+
+Install CLI tools if they are missing:
+
+```bash
+npm install -g ctx7 @playwright/cli
+playwright-cli --help
+```
+
+Use the Playwright browser-install flow if it reports a missing browser. Both
+`npx` and the installed CLIs must be available on the PATH of the terminal that
+starts Claude. Under WSL use the Linux Node/Claude installations.
+
+Superpowers and other user-installed Codex plugins are not automatically shared
+with Claude. When a slice requires Superpowers, install its Claude version inside
+a Claude session, then restart the session:
+
+```text
+/plugin install superpowers@claude-plugins-official
+```
+
+Claude uses its own task/plan tracking for an approved implementation; the Codex
+GOAL commands below apply only to Codex. Slice-specific user authorizations still
+take precedence. No global agent settings or hooks need to be copied into this
+repository.
+
+Configuration references: [Claude memory imports](https://code.claude.com/docs/en/memory#import-additional-files),
+[Claude skills](https://code.claude.com/docs/en/skills),
+[Svelte plugin](https://svelte.dev/docs/ai/claude-plugin),
+[Context7](https://context7.com/docs/installation),
+[Playwright CLI](https://github.com/microsoft/playwright-cli), and
+[Superpowers installation](https://github.com/obra/superpowers#claude-code).
+
+## Original Codex starter kit
 
 These files are intended to be copied into the ROOT of an ALREADY GENERATED Tauri + Svelte project. They contain no application code and do not presume access to your local repository.
 
@@ -17,8 +76,8 @@ These files are intended to be copied into the ROOT of an ALREADY GENERATED Taur
 
 - Official Svelte Codex plugin: `codex plugin marketplace add sveltejs/ai-tools`, then `codex` → `/plugins` → install `svelte`.
 - Superpowers: already installed? Check `ls -la ~/.agents/skills/superpowers`. Otherwise see https://github.com/obra/superpowers/blob/main/.codex/INSTALL.md
-- Optional UI audit skill: `npx skills add vercel-labs/agent-skills --skill web-design-guidelines -a codex`
-- Context7 and Playwright MCP: supplied in `.codex/config.toml`, installed on use via `npx`. Review trust and network prompts. Use `codex mcp list` to verify.
+- Playwright CLI and the UI audit skill are already shared in `.agents/skills/`; Claude entrypoints are in `.claude/skills/`. No separate skill installation is needed for this checkout.
+- Context7 CLI: install `ctx7` if missing and use the installed documentation skill. Run `ctx7 login` for authentication or higher rate limits.
 
 ## First-run verification
 

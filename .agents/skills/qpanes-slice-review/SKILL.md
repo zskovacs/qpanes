@@ -1,6 +1,6 @@
 ---
 name: qpanes-slice-review
-description: Verify a QPanes desktop-app implementation slice before marking a Codex GOAL complete or merging. Use after implementation or when asked for a QPanes quality gate, acceptance review, or cross-platform risk assessment; do not use for initial brainstorming.
+description: Verify a QPanes desktop-app implementation slice before declaring it complete or merging. Use after implementation or when asked for a QPanes quality gate, acceptance review, or cross-platform risk assessment; do not use for initial brainstorming.
 ---
 
 # QPanes slice quality gate
@@ -12,4 +12,4 @@ description: Verify a QPanes desktop-app implementation slice before marking a C
 5. Run each appropriate configured `mise` verification task; save exact commands and pass/fail. Do not claim tests that were not executed.
 6. For UI behavior, explicitly separate browser tests with mocked Tauri IPC from actual Tauri desktop tests; request manual checks if the desktop cannot be driven in this environment.
 7. Produce a terse report with: PASS/FAIL/UNVERIFIED for each criterion; most serious bugs first; commands executed; evidence; release blockers; and whether to merge.
-8. Do not automatically commit, merge, or close the Goal if any critical acceptance criterion is unverified or failing.
+8. Do not automatically commit, merge, or declare the slice complete if any critical acceptance criterion is unverified or failing.

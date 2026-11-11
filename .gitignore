@@ -22,6 +22,11 @@ target/
 /.aws/
 /.ssh/
 /.codex/
+/CLAUDE.local.md
+/.claude/settings.local.json
+/.claude/worktrees/
+/.claude/plans/
+/.claude/tasks/
 *.pem
 *.key
 *.p12

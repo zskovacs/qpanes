@@ -8,10 +8,14 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+mod invalidation;
+pub use invalidation::classify_operation_invalidation;
+pub mod operation_manager;
 mod operations;
 pub use operations::{
-    CreateDirectoryRequest, OperationResult, RenameRequest, TransferRequest, TrashRequest,
-    copy_entry, create_directory, move_entry, rename_entry, trash_entry,
+    CopyObserver, CopyProgress, CreateDirectoryRequest, OperationResult, RenameRequest,
+    TransferRequest, TrashRequest, copy_entry, copy_entry_observed, create_directory, move_entry,
+    rename_entry, trash_entry,
 };
 
 /// Lossless native path. Display labels must never be used as path identifiers.
@@ -148,7 +152,7 @@ pub enum EntryKind {
     Unknown,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Entry {
     pub path: NativePath,
@@ -174,7 +178,7 @@ pub struct DirectoryListing {
     pub direction: SortDirection,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ErrorCode {
     NotFound,
@@ -193,13 +197,24 @@ pub enum ErrorCode {
     UnsupportedPlatform,
     SourceChanged,
     TrashFailed,
+    Cancelled,
+    CancellationCleanupFailed,
+    QueueFull,
+    InvalidOperation,
+    DuplicateSubmission,
+    ShuttingDown,
+    CounterOverflow,
+    StorageFull,
+    ReadFailed,
+    WriteFailed,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FsError {
     pub code: ErrorCode,
     pub message: String,
+    pub recovery: Option<NativePath>,
 }
 
 impl FsError {
@@ -207,6 +222,7 @@ impl FsError {
         Self {
             code: ErrorCode::InvalidPath,
             message: "Enter a valid absolute directory path.".into(),
+            recovery: None,
         }
     }
 
@@ -214,6 +230,7 @@ impl FsError {
         Self {
             code: ErrorCode::Unavailable,
             message: "The filesystem worker could not finish. Try again.".into(),
+            recovery: None,
         }
     }
 
@@ -221,11 +238,13 @@ impl FsError {
         Self {
             code: ErrorCode::Unavailable,
             message: "The filesystem worker stopped before reporting the result. Inspect the source, destination and Trash before attempting another operation.".into(),
+            recovery: None,
         }
     }
 
     fn from_io(error: io::Error) -> Self {
         let code = match error.kind() {
+            io::ErrorKind::StorageFull => ErrorCode::StorageFull,
             io::ErrorKind::NotFound => ErrorCode::NotFound,
             io::ErrorKind::PermissionDenied => ErrorCode::PermissionDenied,
             io::ErrorKind::NotADirectory => ErrorCode::NotDirectory,
@@ -238,6 +257,7 @@ impl FsError {
         Self {
             code,
             message: error.to_string(),
+            recovery: None,
         }
     }
 }

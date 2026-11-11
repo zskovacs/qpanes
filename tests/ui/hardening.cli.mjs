@@ -44,6 +44,7 @@ async (page) => {
       invoke: async (command, payload) => {
       if (command.startsWith('plugin:window|')) return command.endsWith('|scale_factor') ? 1 : false;
       if (command.startsWith('plugin:event|')) return 1;
+        if (command === 'list_operations') return { revision: 0, invalidationRevision: 0, jobs: [], accepting: true, closeRequested: false, shutdownState: 'idle' };
       const request = command === 'list_directory' ? payload.request : payload;
       c.requests.push({ command, ...request });
       if (command === 'sort_directory_entries') {

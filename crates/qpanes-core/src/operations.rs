@@ -1,4 +1,4 @@
-//! Single-entry local mutations. No UI, Tauri, shell, retries or operation queue.
+//! Single-entry local mutations, independent of desktop IPC and scheduling.
 use crate::{Entry, EntryKind, ErrorCode, FsError, NativePath};
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, OpenOptionsMaybeDirExt};
 use cap_std::{ambient_authority, fs::Dir};
@@ -14,34 +14,34 @@ use std::{
 
 mod native;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateDirectoryRequest {
     pub parent: NativePath,
     pub name: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RenameRequest {
     pub source: Entry,
     pub name: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TransferRequest {
     pub source: Entry,
     pub destination: NativePath,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TrashRequest {
     pub source: Entry,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OperationResult {
     pub path: Option<NativePath>,
@@ -52,6 +52,7 @@ fn fail(code: ErrorCode, message: impl Into<String>) -> FsError {
     FsError {
         code,
         message: message.into(),
+        recovery: None,
     }
 }
 
@@ -424,6 +425,7 @@ impl Staging {
             Ok(directory)
         };
         let directory = acquire().map_err(|mut error| {
+            error.recovery = Some(NativePath::from_path(&path));
             error.message = format!(
                 "Could not safely acquire copy staging at {}: {}. It was left untouched; inspect this location and any renamed staging before removal.",
                 path.display(), error.message
@@ -444,21 +446,108 @@ impl Staging {
 const COPY_BUFFER: usize = 64 * 1024;
 const MAX_COPY_DEPTH: usize = 128;
 
-fn stream_copy(reader: &mut impl Read, writer: &mut impl Write) -> io::Result<u64> {
-    // Keep the bounded buffer off recursive traversal's stack, including when
-    // release optimization inlines this helper into copy_node.
+/// Actual filesystem work. Totals for recursive trees deliberately remain unknown.
+#[derive(Debug, Clone, Default)]
+pub struct CopyProgress {
+    pub current_item: Option<NativePath>,
+    pub current_label: Option<String>,
+    pub bytes_processed: u64,
+    pub total_bytes: Option<u64>,
+    pub completed_files: u64,
+    pub total_files: Option<u64>,
+}
+
+/// Called on the filesystem worker, never while holding a manager registry lock.
+/// `begin_publication` must arbitrate cancellation before permitting publication.
+pub trait CopyObserver {
+    fn checkpoint(&mut self, _progress: &CopyProgress) -> Result<(), FsError> {
+        Ok(())
+    }
+    fn begin_publication(&mut self, progress: &CopyProgress) -> Result<(), FsError> {
+        self.checkpoint(progress)
+    }
+    fn published(&mut self) {}
+}
+struct Unobserved;
+impl CopyObserver for Unobserved {}
+
+struct CopyTracker<'a> {
+    observer: &'a mut dyn CopyObserver,
+    progress: CopyProgress,
+}
+impl CopyTracker<'_> {
+    fn checkpoint(&mut self) -> Result<(), FsError> {
+        self.observer.checkpoint(&self.progress)
+    }
+    fn add_bytes(&mut self, bytes: u64) -> Result<(), FsError> {
+        let processed = self
+            .progress
+            .bytes_processed
+            .checked_add(bytes)
+            .ok_or_else(|| {
+                fail(
+                    ErrorCode::CounterOverflow,
+                    "Copy byte counter exceeded its supported range.",
+                )
+            })?;
+        if self
+            .progress
+            .total_bytes
+            .is_some_and(|total| processed > total)
+        {
+            return Err(changed());
+        }
+        self.progress.bytes_processed = processed;
+        self.checkpoint()
+    }
+}
+
+fn stream_error(error: io::Error, phase: ErrorCode) -> FsError {
+    let mut error = FsError::from_io(error);
+    if error.code == ErrorCode::Io {
+        error.code = phase;
+    }
+    error
+}
+
+fn stream_copy(
+    reader: &mut impl Read,
+    writer: &mut impl Write,
+    tracker: &mut CopyTracker<'_>,
+) -> Result<u64, FsError> {
     let mut buffer = vec![0_u8; COPY_BUFFER];
-    let mut total = 0;
+    let mut total = 0_u64;
     loop {
+        tracker.checkpoint()?;
         let read = match reader.read(&mut buffer) {
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            result => result?,
+            result => result.map_err(|error| stream_error(error, ErrorCode::ReadFailed))?,
         };
         if read == 0 {
             return Ok(total);
         }
-        writer.write_all(&buffer[..read])?;
-        total += read as u64;
+        let mut written = 0;
+        while written < read {
+            tracker.checkpoint()?;
+            let count = match writer.write(&buffer[written..read]) {
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                result => result.map_err(|error| stream_error(error, ErrorCode::WriteFailed))?,
+            };
+            if count == 0 {
+                return Err(stream_error(
+                    io::ErrorKind::WriteZero.into(),
+                    ErrorCode::WriteFailed,
+                ));
+            }
+            written += count;
+            total = total.checked_add(count as u64).ok_or_else(|| {
+                fail(
+                    ErrorCode::CounterOverflow,
+                    "Copy byte counter exceeded its supported range.",
+                )
+            })?;
+            tracker.add_bytes(count as u64)?;
+        }
     }
 }
 
@@ -484,22 +573,37 @@ fn verify_unchanged(before: &Metadata, after: &Metadata) -> Result<(), FsError> 
     Ok(())
 }
 
+struct CopyTree {
+    device: u64,
+    mount: Option<u64>,
+    staging: Identity,
+    ancestors: Vec<Identity>,
+}
+
 fn copy_node(
     input: &mut File,
     output_dir: &Dir,
     name: &OsStr,
-    device: u64,
-    mount: Option<u64>,
-    staging: Identity,
-    ancestors: &mut Vec<Identity>,
+    tree: &mut CopyTree,
+    source_path: &Path,
+    tracker: &mut CopyTracker<'_>,
+    prepared: &Metadata,
 ) -> Result<(), FsError> {
+    tracker.progress.current_item = Some(NativePath::from_path(source_path));
+    tracker.progress.current_label = Some(source_path.to_string_lossy().into_owned());
+    tracker.checkpoint()?;
     let metadata = input.metadata().map_err(FsError::from_io)?;
+    // Totals and streaming bounds must describe the same opened-file version.
+    // Revalidate after the cooperative boundary, before creating a payload or
+    // writing anything: a concurrent preparation-time resize is a failed copy,
+    // not a newly accepted total that can hide already written work.
+    verify_unchanged(prepared, &metadata)?;
     let identity = native::identity(input).map_err(FsError::from_io)?;
-    if identity.device != device
-        || identity == staging
-        || (mount.is_some() && native::mount_id(input)? != mount)
-        || ancestors.contains(&identity)
-        || ancestors.len() >= MAX_COPY_DEPTH
+    if identity.device != tree.device
+        || identity == tree.staging
+        || (tree.mount.is_some() && native::mount_id(input)? != tree.mount)
+        || tree.ancestors.contains(&identity)
+        || tree.ancestors.len() >= MAX_COPY_DEPTH
     {
         return Err(fail(
             ErrorCode::UnsupportedEntry,
@@ -518,30 +622,51 @@ fn copy_node(
             .map_err(FsError::from_io)?
             .into_std();
         // Bound reads to the initial length, then detect growth/short reads.
-        let copied = stream_copy(&mut (&mut *input).take(metadata.len()), &mut output)
-            .map_err(FsError::from_io)?;
+        let copied = stream_copy(
+            &mut (&mut *input).take(metadata.len()),
+            &mut output,
+            tracker,
+        )?;
         let mut extra = [0];
         if copied != metadata.len() || input.read(&mut extra).map_err(FsError::from_io)? != 0 {
             return Err(changed());
         }
         verify_unchanged(&metadata, &input.metadata().map_err(FsError::from_io)?)?;
         preserve_metadata(&output, &metadata)?;
+        tracker.progress.completed_files = tracker
+            .progress
+            .completed_files
+            .checked_add(1)
+            .ok_or_else(|| {
+                fail(
+                    ErrorCode::CounterOverflow,
+                    "Copy file counter exceeded its supported range.",
+                )
+            })?;
+        tracker.checkpoint()?;
     } else if metadata.is_dir() {
         output_dir.create_dir(name).map_err(FsError::from_io)?;
         let output = output_dir
             .open_dir_nofollow(name)
             .map_err(FsError::from_io)?;
         let source = Dir::from_std_file(input.try_clone().map_err(FsError::from_io)?);
-        ancestors.push(identity);
+        tree.ancestors.push(identity);
         for entry in source.entries().map_err(FsError::from_io)? {
             let entry = entry.map_err(FsError::from_io)?;
             let name = entry.file_name();
             let mut child = open_entry(&source, &name)?;
+            let child_metadata = child.metadata().map_err(FsError::from_io)?;
             copy_node(
-                &mut child, &output, &name, device, mount, staging, ancestors,
+                &mut child,
+                &output,
+                &name,
+                tree,
+                &source_path.join(&name),
+                tracker,
+                &child_metadata,
             )?;
         }
-        ancestors.pop();
+        tree.ancestors.pop();
         verify_unchanged(&metadata, &input.metadata().map_err(FsError::from_io)?)?;
         native::directory_metadata(&output, &metadata)?;
     } else {
@@ -554,6 +679,14 @@ fn copy_node(
 }
 
 pub fn copy_entry(request: TransferRequest) -> Result<OperationResult, FsError> {
+    copy_entry_observed(request, &mut Unobserved)
+}
+
+pub fn copy_entry_observed(
+    request: TransferRequest,
+    observer: &mut dyn CopyObserver,
+) -> Result<OperationResult, FsError> {
+    observer.checkpoint(&CopyProgress::default())?;
     let mut source = Source::open(request.source)?;
     let path = request.destination.to_path()?;
     let destination = open_directory(&path)?;
@@ -571,7 +704,7 @@ pub fn copy_entry(request: TransferRequest) -> Result<OperationResult, FsError> 
         Err(error) => return Err(FsError::from_io(error)),
     }
     let staging = Staging::create(&destination, &path, "copy")?;
-    copy_to_staging(&mut source, &destination, &path, staging)
+    copy_to_staging(&mut source, &destination, &path, staging, observer)
 }
 
 fn copy_to_staging(
@@ -579,7 +712,17 @@ fn copy_to_staging(
     destination: &Dir,
     path: &Path,
     staging: Staging,
+    observer: &mut dyn CopyObserver,
 ) -> Result<OperationResult, FsError> {
+    let single_file = source.metadata.is_file();
+    let mut tracker = CopyTracker {
+        observer,
+        progress: CopyProgress {
+            total_bytes: single_file.then_some(source.metadata.len()),
+            total_files: single_file.then_some(1),
+            ..CopyProgress::default()
+        },
+    };
     let attempt: Result<OperationResult, FsError> = (|| {
         let mount = if source.metadata.is_dir() {
             native::mount_id(&source.file)?
@@ -590,13 +733,19 @@ fn copy_to_staging(
             &mut source.file,
             &staging.directory,
             OsStr::new("payload"),
-            source.identity.device,
-            mount,
-            dir_identity(&staging.directory)?,
-            &mut Vec::new(),
+            &mut CopyTree {
+                device: source.identity.device,
+                mount,
+                staging: dir_identity(&staging.directory)?,
+                ancestors: Vec::new(),
+            },
+            &source.path,
+            &mut tracker,
+            &source.metadata,
         )?;
         source.revalidate()?;
         check_destination(source, destination)?;
+        tracker.observer.begin_publication(&tracker.progress)?;
         native::rename_noreplace(
             &staging.directory,
             OsStr::new("payload"),
@@ -604,6 +753,7 @@ fn copy_to_staging(
             &source.name,
             None,
         )?;
+        tracker.observer.published();
         Ok(result(&path.join(&source.name)))
     })();
     let recovery = staging.path.clone();
@@ -617,6 +767,10 @@ fn copy_to_staging(
             Ok(result)
         }
         (Err(mut error), Err(cleanup)) => {
+            error.recovery = Some(NativePath::from_path(&recovery));
+            if error.code == ErrorCode::Cancelled {
+                error.code = ErrorCode::CancellationCleanupFailed;
+            }
             error.message.push_str(&format!(
                 " Copy staging could not be removed: {cleanup}. Reserved location: {} (it may have been renamed). Review it before removal; nonempty staging is never deleted automatically.",
                 recovery.display()

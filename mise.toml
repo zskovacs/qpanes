@@ -17,8 +17,8 @@ description = "Check Svelte and TypeScript"
 run = "pnpm check"
 
 [tasks.ui-test]
-description = "Test window state, DPI observations and platform configuration"
-run = "node --test tests/window-state.test.mjs"
+description = "Test window state, operation snapshots and submission lifecycle"
+run = ["node tests/window-state.test.mjs", "node tests/operations-state.test.mjs"]
 
 [tasks.rust-fmt]
 description = "Verify Rust formatting"

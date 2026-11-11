@@ -66,10 +66,34 @@ async function until(expression) {
   }
   throw new Error(`Native condition timed out: ${expression}`);
 }
-async function invoke(name, request) {
-  await evaluate(`window.__operationReply = null; window.__TAURI_INTERNALS__.invoke(${JSON.stringify(name)}, {request:${JSON.stringify(request)}}).then(value => { window.__operationReply = {value}; }, error => { window.__operationReply = {error}; });`);
+async function ipc(name, args = {}) {
+  await evaluate(`window.__operationReply = null; window.__TAURI_INTERNALS__.invoke(${JSON.stringify(name)}, ${JSON.stringify(args)}).then(value => { window.__operationReply = {value}; }, error => { window.__operationReply = {error}; });`);
   await until('window.__operationReply !== null');
   return evaluate('window.__operationReply');
+}
+let operationSequence = 0;
+async function invoke(name, request) {
+  const kinds = {create_directory:'create',rename_entry:'rename',copy_entry:'copy',move_entry:'move',trash_entry:'trash'};
+  if (!kinds[name]) return ipc(name, {request});
+  const reply = await ipc('submit_operation', {request:{clientId:'native-regression',sequence:++operationSequence,intent:{kind:kinds[name],...request}}});
+  if (reply.error) return reply;
+  const id = reply.value.id;
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    const current = await ipc('get_operation', {id});
+    if (['completed','failed','cancelled'].includes(current.value?.state)) {
+      return current.value.state === 'completed' ? {value:current.value.result} : {error:current.value.error};
+    }
+  }
+  throw new Error('Native queued mutation did not finish');
+}
+async function waitJobs() {
+  const deadline = Date.now()+15000;
+  while (Date.now()<deadline) {
+    const snapshot = await ipc('list_operations');
+    if (snapshot.value.jobs.every(job=>['completed','failed','cancelled'].includes(job.state))) return snapshot.value;
+  }
+  throw new Error('Native jobs remained active');
 }
 async function success(name, request) {
   const reply = await invoke(name, request);
@@ -154,6 +178,7 @@ async function fillName(value) {
 }
 async function confirm() {
   await key('Return');
+  await waitJobs();
   await until(`!${q(dialog)} && Array.from(document.querySelectorAll('[role=listbox]')).every(el=>el.getAttribute('aria-busy')==='false')`);
 }
 async function check(expression, message) {
@@ -302,13 +327,15 @@ try {
     await fillName('created by native UI');
     await confirm();
     assert((await lstat(join(sourceDir, 'created by native UI'))).isDirectory());
-    await check(`${q(selected('left'))}.textContent === 'created by native UI' && document.activeElement === ${q(list('left'))}`, 'native Enter creates, refreshes and selects new directory with list focus restored');
+    await until(`Array.from(document.querySelectorAll('${list('left')} .filename')).some(el=>el.textContent==='created by native UI')`);
+    await check(`document.activeElement === ${q(list('left'))}`, 'native Enter queues creation, refreshes current directory and restores list focus');
     await open('left', 'created by native UI', 'F2', 'Rename');
     await check(`${q('#operation-name')}.value === 'created by native UI' && document.activeElement === ${q('#operation-name')}`, 'F2 prepopulates selected real name and focuses the input');
     await fillName('renamed by native UI');
     await confirm();
     await absent(join(sourceDir, 'created by native UI'));
-    await check(`${q(selected('left'))}.textContent === 'renamed by native UI'`, 'native rename refresh selects returned entry identity');
+    await until(`Array.from(document.querySelectorAll('${list('left')} .filename')).some(el=>el.textContent==='renamed by native UI')`);
+    checked('native rename completion refreshes current directory without navigating');
 
     await open('left', 'renamed by native UI', 'F5', 'Copy');
     await check(`${q(dialog)}.textContent.includes('renamed by native UI') && ${q(dialog)}.textContent.includes(${JSON.stringify(sourceDir)}) && ${q(dialog)}.textContent.includes(${JSON.stringify(destinationDir)})`, 'F5 confirmation displays actual source and opposite-panel destination');
@@ -318,12 +345,15 @@ try {
     await open('left', 'renamed by native UI', 'F5', 'Copy');
     await confirm();
     assert((await lstat(join(destinationDir, 'renamed by native UI'))).isDirectory());
-    await check(`${q(selected('right'))}.textContent === 'renamed by native UI'`, 'native Copy confirmation invokes Rust and refreshes opposite panel selection');
+    await until(`Array.from(document.querySelectorAll('${list('right')} .filename')).some(el=>el.textContent==='renamed by native UI')`);
+    checked('native Copy confirmation invokes Rust and refreshes opposite panel');
     await open('left', 'renamed by native UI', 'F5', 'Copy');
     await key('Return');
-    await until(`${q('#operation-error')} !== null`);
-    await check(`${q('#operation-error')}.textContent.includes('conflict') && ${q(dialog)}.open && ${q(dialog)}.contains(document.activeElement)`, 'native Rust conflict stays visible in focused operation dialog');
-    await cancel('left');
+    await waitJobs();
+    await until(`!${q(dialog)}`);
+    await evaluate(`document.querySelector('.operations-toggle').click()`);
+    await until(`Array.from(document.querySelectorAll('.operation-job.failed')).some(el=>el.textContent.includes('conflict'))`);
+    checked('native Rust conflict is retained visibly in Operations after dialog admission');
 
     await writeFile(join(destinationDir, 'right-to-left.txt'), 'opposite direction');
     await go('right', destinationDir);
@@ -331,7 +361,8 @@ try {
     await confirm();
     assert.equal(await readFile(join(sourceDir, 'right-to-left.txt'), 'utf8'), 'opposite direction');
     await absent(join(destinationDir, 'right-to-left.txt'));
-    await check(`${q(selected('left'))}.textContent === 'right-to-left.txt' && document.activeElement === ${q(list('right'))}`, 'F6 uses active right source and left destination, refreshes both and restores source focus');
+    await until(`Array.from(document.querySelectorAll('${list('left')} .filename')).some(el=>el.textContent==='right-to-left.txt')`);
+    await check(`document.activeElement === ${q(list('right'))}`, 'F6 uses active right source and left destination, refreshes both and preserves focus');
 
     await select('left', '[..]');
     for (const shortcut of ['F2', 'F5', 'F6', 'Delete']) {
@@ -362,9 +393,11 @@ try {
   await open('left', 'trash-cancel.txt', 'Delete', 'Move to Trash');
   await rm(join(sourceDir, 'trash-cancel.txt'));
   await key('Return');
-  await until(`${q('#operation-error')} !== null`);
-  await check(`${q(dialog)}.open && ${q('#operation-error')}.textContent.length > 0`, 'real Trash missing-source failure is reported and dialog remains cancellable');
-  await cancel('left');
+  await waitJobs();
+  await until(`!${q(dialog)}`);
+  await evaluate(`if(document.querySelector('.operations-toggle').getAttribute('aria-expanded')==='false') document.querySelector('.operations-toggle').click()`);
+  await until(`Array.from(document.querySelectorAll('.operation-job.failed')).some(el=>el.textContent.includes('trash-cancel.txt'))`);
+  checked('real Trash missing-source failure is retained in Operations without retry');
 
   if (isolatedRoot) {
     const pid = Number(process.env.QPANES_NATIVE_APP_PID);

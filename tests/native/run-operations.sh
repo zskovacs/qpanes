@@ -53,6 +53,11 @@ if [[ "${1:-}" == --private-session ]]; then
     printf '%s\n' 'Could not identify the private Trash Portal.' >&2
     exit 1
   fi
+  if [[ "${QPANES_NATIVE_BACKGROUND:-}" == 1 ]]; then
+    cc -shared -fPIC tests/native/io-faults.c -o "$QPANES_NATIVE_TRASH_ROOT/io-faults.so"
+    export QPANES_TEST_IO_ROOT="$QPANES_NATIVE_TRASH_ROOT"
+    export LD_PRELOAD="$QPANES_NATIVE_TRASH_ROOT/io-faults.so"
+  fi
   src-tauri/target/debug/qpanes >"$QPANES_NATIVE_TRASH_ROOT/app.log" 2>&1 &
   export QPANES_NATIVE_APP_PID=$!
   for ((qpanes_attempt=0; qpanes_attempt<100; qpanes_attempt++)); do
@@ -64,8 +69,15 @@ if [[ "${1:-}" == --private-session ]]; then
   test -s "$QPANES_NATIVE_TRASH_ROOT/inspector.html"
   # WebKit publishes its inspector before the initial blank page has loaded.
   sleep 2
-  if [[ "${QPANES_NATIVE_PHASE:-all}" != trash ]]; then node tests/native/smoke.mjs; fi
-  node tests/native/operations.mjs
+  if [[ "${QPANES_NATIVE_PHASE:-all}" == history ]]; then
+    node tests/native/history-invalidation.mjs
+  elif [[ "${QPANES_NATIVE_PHASE:-all}" == hardening ]]; then
+    node tests/native/hardening.mjs
+  else
+    if [[ "${QPANES_NATIVE_PHASE:-all}" != trash ]]; then node tests/native/smoke.mjs; fi
+    node tests/native/operations.mjs
+    if [[ "${QPANES_NATIVE_BACKGROUND:-}" == 1 ]]; then node tests/native/background-operations.mjs; fi
+  fi
   exit
 fi
 

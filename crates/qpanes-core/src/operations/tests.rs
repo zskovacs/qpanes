@@ -250,7 +250,11 @@ fn copy_large_file_uses_fixed_buffer_and_exact_bytes() {
             &mut BoundedReader {
                 remaining: COPY_BUFFER * 4 + 7
             },
-            &mut io::sink()
+            &mut io::sink(),
+            &mut CopyTracker {
+                observer: &mut Unobserved,
+                progress: CopyProgress::default()
+            }
         )
         .unwrap(),
         (COPY_BUFFER * 4 + 7) as u64
@@ -661,14 +665,23 @@ fn recursion_rejects_its_own_staging_if_namespace_changes_put_it_in_the_source()
     let mut input = dir_file(&staging.directory).unwrap();
     let id = dir_identity(&staging.directory).unwrap();
     let mount = native::mount_id(&input).unwrap();
+    let prepared = input.metadata().unwrap();
     let error = copy_node(
         &mut input,
         &source,
         OsStr::new("must-not-exist"),
-        id.device,
-        mount,
-        id,
-        &mut Vec::new(),
+        &mut CopyTree {
+            device: id.device,
+            mount,
+            staging: id,
+            ancestors: Vec::new(),
+        },
+        &fixture.left(),
+        &mut CopyTracker {
+            observer: &mut Unobserved,
+            progress: CopyProgress::default(),
+        },
+        &prepared,
     )
     .unwrap_err();
     assert_eq!(error.code, ErrorCode::UnsupportedEntry);
@@ -694,8 +707,16 @@ fn write_failure_propagates_instead_of_reporting_success() {
         }
     }
     let mut source = io::repeat(7).take(COPY_BUFFER as u64 * 3);
-    let error = stream_copy(&mut source, &mut Full { written: 0 }).unwrap_err();
-    assert_eq!(error.kind(), io::ErrorKind::StorageFull);
+    let error = stream_copy(
+        &mut source,
+        &mut Full { written: 0 },
+        &mut CopyTracker {
+            observer: &mut Unobserved,
+            progress: CopyProgress::default(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::StorageFull);
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -841,7 +862,14 @@ fn successful_copy_retains_foreign_staging_contents_and_returns_a_warning() {
     let foreign = fixture.root.join("independent-data");
     fs::write(&foreign, b"never delete these unrelated bytes").unwrap();
     fs::rename(&foreign, recovery.join("independent-data")).unwrap();
-    let result = copy_to_staging(&mut source, &destination, &fixture.right(), staging).unwrap();
+    let result = copy_to_staging(
+        &mut source,
+        &destination,
+        &fixture.right(),
+        staging,
+        &mut Unobserved,
+    )
+    .unwrap();
     assert_eq!(
         result.path,
         Some(NativePath::from_path(&fixture.right().join("selected")))
@@ -878,7 +906,14 @@ fn failed_copy_retains_foreign_payload_and_staging_contents() {
         b"unrelated original bytes",
     )
     .unwrap();
-    let error = copy_to_staging(&mut source, &destination, &fixture.right(), staging).unwrap_err();
+    let error = copy_to_staging(
+        &mut source,
+        &destination,
+        &fixture.right(),
+        staging,
+        &mut Unobserved,
+    )
+    .unwrap_err();
     assert_eq!(error.code, ErrorCode::Conflict);
     assert!(error.message.contains(&recovery.display().to_string()));
     assert!(
@@ -963,4 +998,602 @@ fn trash_failure_has_no_permanent_deletion_fallback() {
         .status()
         .unwrap();
     assert!(status.success());
+}
+
+#[test]
+fn observed_copy_reports_real_incremental_bytes_and_only_publishes_after_data_and_metadata() {
+    struct Recorder {
+        updates: Vec<CopyProgress>,
+        destination: PathBuf,
+        published: bool,
+    }
+    impl CopyObserver for Recorder {
+        fn checkpoint(&mut self, progress: &CopyProgress) -> Result<(), FsError> {
+            assert!(!self.destination.exists());
+            assert!(
+                progress
+                    .total_bytes
+                    .is_none_or(|total| progress.bytes_processed <= total)
+            );
+            self.updates.push(progress.clone());
+            Ok(())
+        }
+        fn begin_publication(&mut self, progress: &CopyProgress) -> Result<(), FsError> {
+            assert_eq!(progress.completed_files, 1);
+            assert_eq!(progress.bytes_processed, progress.total_bytes.unwrap());
+            assert!(!self.destination.exists());
+            Ok(())
+        }
+        fn published(&mut self) {
+            assert!(self.destination.exists());
+            self.published = true;
+        }
+    }
+    let fixture = Fixture::new();
+    let bytes = vec![17; COPY_BUFFER * 20 + 7];
+    fs::write(fixture.left().join("large"), &bytes).unwrap();
+    let mut recorder = Recorder {
+        updates: vec![],
+        destination: fixture.right().join("large"),
+        published: false,
+    };
+    copy_entry_observed(fixture.transfer("large"), &mut recorder).unwrap();
+    assert!(recorder.published);
+    assert!(
+        recorder
+            .updates
+            .iter()
+            .map(|progress| progress.bytes_processed)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            > 20
+    );
+    let final_update = recorder.updates.last().unwrap();
+    assert_eq!(final_update.bytes_processed, bytes.len() as u64);
+    assert_eq!(final_update.total_files, Some(1));
+    assert_eq!(fs::read(recorder.destination).unwrap(), bytes);
+}
+#[test]
+fn recursive_progress_aggregates_files_including_empty_files_without_inventing_totals() {
+    struct Recorder(CopyProgress);
+    impl CopyObserver for Recorder {
+        fn checkpoint(&mut self, progress: &CopyProgress) -> Result<(), FsError> {
+            assert!(progress.total_bytes.is_none());
+            assert!(progress.total_files.is_none());
+            self.0 = progress.clone();
+            Ok(())
+        }
+    }
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.left().join("tree/nested/empty-dir")).unwrap();
+    fs::write(fixture.left().join("tree/empty"), b"").unwrap();
+    fs::write(fixture.left().join("tree/nested/data"), b"actual bytes").unwrap();
+    let mut recorder = Recorder(CopyProgress::default());
+    copy_entry_observed(fixture.transfer("tree"), &mut recorder).unwrap();
+    assert_eq!(recorder.0.bytes_processed, 12);
+    assert_eq!(recorder.0.completed_files, 2);
+    assert!(fixture.right().join("tree/nested/empty-dir").is_dir());
+    fixture.no_staging();
+}
+#[test]
+fn zero_byte_file_has_truthful_zero_totals_and_completes_after_publication() {
+    struct Recorder(CopyProgress);
+    impl CopyObserver for Recorder {
+        fn checkpoint(&mut self, p: &CopyProgress) -> Result<(), FsError> {
+            self.0 = p.clone();
+            Ok(())
+        }
+    }
+    let fixture = Fixture::new();
+    fs::write(fixture.left().join("empty"), b"").unwrap();
+    let mut recorder = Recorder(CopyProgress::default());
+    copy_entry_observed(fixture.transfer("empty"), &mut recorder).unwrap();
+    assert_eq!(recorder.0.total_bytes, Some(0));
+    assert_eq!(recorder.0.bytes_processed, 0);
+    assert_eq!(recorder.0.completed_files, 1);
+    assert!(fixture.right().join("empty").is_file());
+}
+#[test]
+fn streaming_counts_partial_writes_and_preserves_read_write_failure_codes() {
+    struct Recorder(u64);
+    impl CopyObserver for Recorder {
+        fn checkpoint(&mut self, p: &CopyProgress) -> Result<(), FsError> {
+            self.0 = p.bytes_processed;
+            Ok(())
+        }
+    }
+    struct Partial {
+        written: usize,
+    }
+    impl Write for Partial {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.written >= 7 {
+                return Err(io::ErrorKind::StorageFull.into());
+            }
+            let count = bytes.len().min(7);
+            self.written += count;
+            Ok(count)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut recorder = Recorder(0);
+    let error = stream_copy(
+        &mut io::repeat(1).take(100),
+        &mut Partial { written: 0 },
+        &mut CopyTracker {
+            observer: &mut recorder,
+            progress: CopyProgress::default(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::StorageFull);
+    assert_eq!(recorder.0, 7);
+    struct Broken;
+    impl Read for Broken {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(io::ErrorKind::Other.into())
+        }
+    }
+    assert_eq!(
+        stream_copy(
+            &mut Broken,
+            &mut io::sink(),
+            &mut CopyTracker {
+                observer: &mut Unobserved,
+                progress: CopyProgress::default()
+            }
+        )
+        .unwrap_err()
+        .code,
+        ErrorCode::ReadFailed
+    );
+}
+#[test]
+fn progress_overflow_fails_explicitly() {
+    let mut tracker = CopyTracker {
+        observer: &mut Unobserved,
+        progress: CopyProgress {
+            bytes_processed: u64::MAX,
+            ..CopyProgress::default()
+        },
+    };
+    assert_eq!(
+        tracker.add_bytes(1).unwrap_err().code,
+        ErrorCode::CounterOverflow
+    );
+    assert_eq!(tracker.progress.bytes_processed, u64::MAX);
+    let mut known = CopyTracker {
+        observer: &mut Unobserved,
+        progress: CopyProgress {
+            bytes_processed: 9,
+            total_bytes: Some(10),
+            ..CopyProgress::default()
+        },
+    };
+    assert_eq!(
+        known.add_bytes(2).unwrap_err().code,
+        ErrorCode::SourceChanged
+    );
+    assert_eq!(
+        known.progress.bytes_processed, 9,
+        "invalid progress must not exceed a known total"
+    );
+}
+#[test]
+fn cancelled_copy_keeps_foreign_stage_contents_and_exposes_recovery_identity() {
+    struct CancelWithForeign {
+        destination: PathBuf,
+        inserted: Option<PathBuf>,
+    }
+    impl CopyObserver for CancelWithForeign {
+        fn checkpoint(&mut self, progress: &CopyProgress) -> Result<(), FsError> {
+            if progress.bytes_processed == 0 {
+                return Ok(());
+            }
+            let stage = fs::read_dir(&self.destination)
+                .unwrap()
+                .map(|item| item.unwrap().path())
+                .find(|path| {
+                    path.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(".qpanes-copy-")
+                })
+                .unwrap();
+            fs::write(stage.join("foreign"), b"never remove").unwrap();
+            self.inserted = Some(stage);
+            Err(fail(ErrorCode::Cancelled, "Injected cancellation"))
+        }
+    }
+    let fixture = Fixture::new();
+    fs::write(fixture.left().join("file"), vec![9; COPY_BUFFER * 2]).unwrap();
+    let mut observer = CancelWithForeign {
+        destination: fixture.right(),
+        inserted: None,
+    };
+    let error = copy_entry_observed(fixture.transfer("file"), &mut observer).unwrap_err();
+    assert_eq!(error.code, ErrorCode::CancellationCleanupFailed);
+    assert_eq!(
+        error.recovery.unwrap(),
+        NativePath::from_path(observer.inserted.as_ref().unwrap())
+    );
+    assert_eq!(
+        fs::read(observer.inserted.unwrap().join("foreign")).unwrap(),
+        b"never remove"
+    );
+    assert_eq!(
+        fs::read(fixture.left().join("file")).unwrap(),
+        vec![9; COPY_BUFFER * 2]
+    );
+    assert!(!fixture.right().join("file").exists());
+}
+#[test]
+fn publication_conflict_after_full_progress_never_reports_success_or_overwrites() {
+    struct Race {
+        target: PathBuf,
+        fully_copied: bool,
+    }
+    impl CopyObserver for Race {
+        fn begin_publication(&mut self, progress: &CopyProgress) -> Result<(), FsError> {
+            self.fully_copied = progress.total_bytes == Some(progress.bytes_processed);
+            fs::write(&self.target, b"race winner").unwrap();
+            Ok(())
+        }
+        fn published(&mut self) {
+            panic!("failed publication must not report success");
+        }
+    }
+    let fixture = Fixture::new();
+    fs::write(fixture.left().join("file"), b"source").unwrap();
+    let mut observer = Race {
+        target: fixture.right().join("file"),
+        fully_copied: false,
+    };
+    let error = copy_entry_observed(fixture.transfer("file"), &mut observer).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Conflict);
+    assert!(observer.fully_copied);
+    assert_eq!(fs::read(observer.target).unwrap(), b"race winner");
+    assert_eq!(fs::read(fixture.left().join("file")).unwrap(), b"source");
+}
+
+struct ResizeAtPreparation {
+    source: PathBuf,
+    replacement: Vec<u8>,
+    resized: bool,
+    published: bool,
+    progress: CopyProgress,
+}
+impl CopyObserver for ResizeAtPreparation {
+    fn checkpoint(&mut self, progress: &CopyProgress) -> Result<(), FsError> {
+        assert!(
+            progress
+                .total_bytes
+                .is_none_or(|total| progress.bytes_processed <= total)
+        );
+        self.progress = progress.clone();
+        if !self.resized && progress.current_item == Some(NativePath::from_path(&self.source)) {
+            // The observer boundary provides deterministic synchronization with a
+            // writer changing the opened inode, without sleeps or namespace swaps.
+            fs::write(&self.source, &self.replacement).unwrap();
+            self.resized = true;
+        }
+        Ok(())
+    }
+    fn published(&mut self) {
+        self.published = true;
+    }
+}
+
+fn assert_root_preparation_resize_rejected(initial: usize, replacement: Vec<u8>) {
+    let fixture = Fixture::new();
+    let source = fixture.left().join("file");
+    fs::write(&source, vec![17; initial]).unwrap();
+    let mut observer = ResizeAtPreparation {
+        source: source.clone(),
+        replacement: replacement.clone(),
+        resized: false,
+        published: false,
+        progress: CopyProgress::default(),
+    };
+    let result = copy_entry_observed(fixture.transfer("file"), &mut observer);
+    assert!(
+        observer.resized,
+        "the actual opened file was changed at preparation"
+    );
+    if let Some(stage) = result
+        .as_ref()
+        .err()
+        .and_then(|error| error.recovery.as_ref())
+    {
+        let payload = stage.to_path().unwrap().join("payload");
+        if payload.is_file() {
+            assert_eq!(
+                observer.progress.bytes_processed,
+                fs::metadata(payload).unwrap().len(),
+                "every successful staging write must remain accounted for on failure"
+            );
+        }
+    }
+    let error =
+        result.expect_err("changed preparation metadata must not publish a mismatched copy");
+    assert_eq!(error.code, ErrorCode::SourceChanged);
+    assert!(!observer.published);
+    assert_eq!(
+        observer.progress.bytes_processed, 0,
+        "preparation changes fail before output writes"
+    );
+    assert_eq!(observer.progress.completed_files, 0);
+    assert_eq!(observer.progress.total_bytes, Some(initial as u64));
+    assert_eq!(
+        fs::read(source).unwrap(),
+        replacement,
+        "copy never changes the writer's source bytes"
+    );
+    assert!(!fixture.right().join("file").exists());
+    fixture.no_staging();
+}
+
+#[test]
+fn preparation_resize_shrink_rejects_before_streaming_or_publication() {
+    assert_root_preparation_resize_rejected(COPY_BUFFER, b"new".to_vec());
+}
+
+#[test]
+fn preparation_resize_growth_rejects_before_unaccounted_staging_writes() {
+    assert_root_preparation_resize_rejected(1, vec![29; COPY_BUFFER]);
+}
+
+#[test]
+fn preparation_resize_of_recursive_child_rejects_without_publishing_changed_tree() {
+    let fixture = Fixture::new();
+    fs::create_dir(fixture.left().join("tree")).unwrap();
+    let source = fixture.left().join("tree/child");
+    fs::write(&source, vec![17; COPY_BUFFER]).unwrap();
+    let mut observer = ResizeAtPreparation {
+        source: source.clone(),
+        replacement: b"new".to_vec(),
+        resized: false,
+        published: false,
+        progress: CopyProgress::default(),
+    };
+    let error = copy_entry_observed(fixture.transfer("tree"), &mut observer)
+        .expect_err("changed child metadata must fail before streaming that child");
+    assert!(observer.resized);
+    assert!(!observer.published);
+    assert_eq!(error.code, ErrorCode::SourceChanged);
+    assert_eq!(observer.progress.bytes_processed, 0);
+    assert_eq!(observer.progress.completed_files, 0);
+    assert!(observer.progress.total_bytes.is_none());
+    assert!(observer.progress.total_files.is_none());
+    assert_eq!(fs::read(source).unwrap(), b"new");
+    assert!(!fixture.right().join("tree").exists());
+    let retained = error
+        .recovery
+        .expect("the already-created tree payload remains for review")
+        .to_path()
+        .unwrap();
+    assert!(retained.join("payload").is_dir());
+    assert!(!retained.join("payload/child").exists());
+}
+
+#[test]
+fn preparation_resize_growth_of_recursive_child_rejects_before_writes() {
+    let fixture = Fixture::new();
+    fs::create_dir(fixture.left().join("tree")).unwrap();
+    let source = fixture.left().join("tree/child");
+    fs::write(&source, b"a").unwrap();
+    let mut observer = ResizeAtPreparation {
+        source: source.clone(),
+        replacement: vec![31; COPY_BUFFER],
+        resized: false,
+        published: false,
+        progress: CopyProgress::default(),
+    };
+    let error = copy_entry_observed(fixture.transfer("tree"), &mut observer).unwrap_err();
+    assert_eq!(error.code, ErrorCode::SourceChanged);
+    assert!(observer.resized);
+    assert!(!observer.published);
+    assert_eq!(observer.progress.bytes_processed, 0);
+    assert!(observer.progress.total_bytes.is_none());
+    assert_eq!(fs::read(source).unwrap(), vec![31; COPY_BUFFER]);
+    assert!(!fixture.right().join("tree").exists());
+    let stage = error.recovery.unwrap().to_path().unwrap();
+    assert!(stage.join("payload").is_dir());
+    assert!(!stage.join("payload/child").exists());
+}
+
+fn assert_streaming_resize_accounting(recursive: bool, shrink: bool) {
+    struct ResizeAfterWrite {
+        source: PathBuf,
+        shrink: bool,
+        changed: bool,
+        published: bool,
+        progress: CopyProgress,
+    }
+    impl CopyObserver for ResizeAfterWrite {
+        fn checkpoint(&mut self, progress: &CopyProgress) -> Result<(), FsError> {
+            assert!(
+                progress
+                    .total_bytes
+                    .is_none_or(|total| progress.bytes_processed <= total)
+            );
+            self.progress = progress.clone();
+            if !self.changed && progress.bytes_processed > 0 {
+                if self.shrink {
+                    fs::OpenOptions::new()
+                        .write(true)
+                        .open(&self.source)
+                        .unwrap()
+                        .set_len(3)
+                        .unwrap();
+                } else {
+                    fs::OpenOptions::new()
+                        .append(true)
+                        .open(&self.source)
+                        .unwrap()
+                        .write_all(b"growth")
+                        .unwrap();
+                }
+                self.changed = true;
+            }
+            Ok(())
+        }
+        fn published(&mut self) {
+            self.published = true;
+        }
+    }
+    let fixture = Fixture::new();
+    let initial: Vec<u8> = (0..COPY_BUFFER * 3).map(|i| (i % 251) as u8).collect();
+    let name = if recursive { "tree" } else { "file" };
+    if recursive {
+        fs::create_dir(fixture.left().join(name)).unwrap();
+    }
+    let source = fixture
+        .left()
+        .join(if recursive { "tree/child" } else { name });
+    fs::write(&source, &initial).unwrap();
+    let mut observer = ResizeAfterWrite {
+        source: source.clone(),
+        shrink,
+        changed: false,
+        published: false,
+        progress: CopyProgress::default(),
+    };
+    let error = copy_entry_observed(fixture.transfer(name), &mut observer).unwrap_err();
+    assert!(observer.changed);
+    assert!(!observer.published);
+    assert_eq!(error.code, ErrorCode::SourceChanged);
+    assert_eq!(observer.progress.completed_files, 0);
+    assert_eq!(
+        observer.progress.total_bytes,
+        (!recursive).then_some(initial.len() as u64)
+    );
+    assert!(!fixture.right().join(name).exists());
+    let stage = error
+        .recovery
+        .expect("partial output must remain marked for review")
+        .to_path()
+        .unwrap();
+    let payload = fs::read(stage.join(if recursive {
+        "payload/child"
+    } else {
+        "payload"
+    }))
+    .unwrap();
+    assert!(!payload.is_empty());
+    assert_eq!(
+        observer.progress.bytes_processed,
+        payload.len() as u64,
+        "failure preserves the exact successful-write counter"
+    );
+    assert_eq!(
+        payload,
+        initial[..payload.len()],
+        "the retained stage contains the actual streamed prefix"
+    );
+    let expected_source = if shrink {
+        initial[..3].to_vec()
+    } else {
+        [initial, b"growth".to_vec()].concat()
+    };
+    assert_eq!(
+        fs::read(source).unwrap(),
+        expected_source,
+        "the copy cannot change the concurrent writer's source bytes"
+    );
+}
+
+#[test]
+fn streaming_resize_shrink_preserves_actual_written_bytes_in_failed_progress() {
+    assert_streaming_resize_accounting(false, true);
+}
+
+#[test]
+fn streaming_resize_growth_preserves_actual_written_bytes_in_failed_progress() {
+    assert_streaming_resize_accounting(false, false);
+}
+
+#[test]
+fn streaming_resize_of_recursive_child_preserves_unknown_totals_and_actual_bytes() {
+    assert_streaming_resize_accounting(true, false);
+}
+
+#[test]
+fn real_partial_writes_remain_accounted_for_when_later_metadata_validation_fails() {
+    struct PartialOutput {
+        output: File,
+        source: PathBuf,
+        changed: bool,
+        calls: usize,
+    }
+    impl Write for PartialOutput {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let count = self.output.write(&bytes[..bytes.len().min(7)])?;
+            self.calls += 1;
+            if !self.changed && count > 0 {
+                fs::OpenOptions::new()
+                    .append(true)
+                    .open(&self.source)?
+                    .write_all(b"+")?;
+                self.changed = true;
+            }
+            Ok(count)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.output.flush()
+        }
+    }
+    let fixture = Fixture::new();
+    let source = fixture.left().join("file");
+    let initial: Vec<u8> = (0..100).collect();
+    fs::write(&source, &initial).unwrap();
+    let mut input = File::open(&source).unwrap();
+    let prepared = input.metadata().unwrap();
+    let destination = open_directory(&fixture.right()).unwrap();
+    let staging = Staging::create(&destination, &fixture.right(), "copy").unwrap();
+    let recovery = staging.path.clone();
+    let mut output = PartialOutput {
+        output: File::create_new(recovery.join("payload")).unwrap(),
+        source: source.clone(),
+        changed: false,
+        calls: 0,
+    };
+    let mut tracker = CopyTracker {
+        observer: &mut Unobserved,
+        progress: CopyProgress {
+            total_bytes: Some(prepared.len()),
+            total_files: Some(1),
+            ..CopyProgress::default()
+        },
+    };
+    let copied = stream_copy(
+        &mut (&mut input).take(prepared.len()),
+        &mut output,
+        &mut tracker,
+    )
+    .unwrap();
+    assert!(
+        output.calls > 10,
+        "the real output file receives repeated short writes"
+    );
+    assert_eq!(
+        verify_unchanged(&prepared, &input.metadata().unwrap())
+            .unwrap_err()
+            .code,
+        ErrorCode::SourceChanged
+    );
+    assert_eq!(tracker.progress.bytes_processed, copied);
+    assert_eq!(tracker.progress.completed_files, 0);
+    drop(output);
+    assert!(
+        staging.cleanup().is_err(),
+        "nonempty unpublished staging is never recursively removed"
+    );
+    let retained = fs::read(recovery.join("payload")).unwrap();
+    assert_eq!(retained, initial);
+    assert_eq!(tracker.progress.bytes_processed, retained.len() as u64);
+    assert_eq!(fs::read(source).unwrap(), [initial, b"+".to_vec()].concat());
+    assert!(!fixture.right().join("file").exists());
 }

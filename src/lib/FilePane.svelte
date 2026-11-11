@@ -1,4 +1,5 @@
 <script module lang="ts">
+  import { classifyOperationInvalidation } from './operations';
   import type { FileEntry, NativePath } from './filesystem';
   export interface PaneSnapshot {
     path: NativePath;
@@ -33,6 +34,7 @@
   let detailsSummary: HTMLElement;
   let errorSummary = $state<HTMLElement>();
   let sequence = 0;
+  let disposed = false;
   let navigationRevision = 0;
   let draftRevision = 0;
   let editingPath = false;
@@ -60,7 +62,7 @@
 
   onMount(() => {
     void navigate({ kind: 'home' });
-    return () => { sequence++; };
+    return () => { disposed = true; sequence++; };
   });
 
   export function focusList() { listElement?.focus(); }
@@ -76,6 +78,53 @@
   export function refreshAfterOperation(snapshot: PaneSnapshot, selection?: NativePath | null) {
     if (!listing || snapshot.revision !== navigationRevision || snapshot.path !== listing.path) return;
     void navigate({ kind: 'path', value: listing.path }, selection ? entryKey(selection) : selected?.key);
+  }
+
+  // Retain at most the displayed path and one in-flight navigation revision.
+  let pendingOperationPath: NativePath | null = null;
+  let pendingNavigationRefresh: number | null = null;
+  export function refreshAffectedDirectories(paths: NativePath[], subtrees: NativePath[] = [], unknownChanges = false) {
+    // A history gap has no recoverable path set. Re-read only this pane's
+    // current/arriving location through the existing deferred refresh guards.
+    if (listing && (unknownChanges || paths.includes(listing.path))) pendingOperationPath = listing.path;
+    if (loading && (unknownChanges || retryIntent.target.kind !== 'path' || paths.includes(retryIntent.target.value))) {
+      // Typed/home targets are resolved by Rust. Conservatively re-read the
+      // arriving canonical location if work finished during that request.
+      pendingNavigationRefresh = sequence;
+    }
+    if (subtrees.length && !unknownChanges) void checkSubtreeInvalidation(subtrees);
+    refreshPendingOperation();
+  }
+
+  async function checkSubtreeInvalidation(subtrees: NativePath[]) {
+    const revision = navigationRevision;
+    const request = sequence;
+    const displayed = listing?.path;
+    const target = loading && retryIntent.target.kind === 'path' ? retryIntent.target.value : undefined;
+    const paths = [...new Set([displayed, target].filter((path): path is NativePath => path !== undefined))];
+    if (!paths.length) return;
+    try {
+      const affected = await classifyOperationInvalidation(paths, [], subtrees);
+      // A newer navigation already reads after the mutation. Never let an older
+      // ancestry response refresh its former location or restore its selection.
+      if (disposed || revision !== navigationRevision) return;
+      for (let index = 0; index < paths.length; index++) {
+        if (!affected[index]) continue;
+        if (paths[index] === listing?.path) pendingOperationPath = paths[index];
+        if (loading && request === sequence && paths[index] === target) pendingNavigationRefresh = sequence;
+      }
+      refreshPendingOperation();
+    } catch (cause) {
+      if (!disposed && revision === navigationRevision) error = filesystemError(cause);
+    }
+  }
+
+  function refreshPendingOperation() {
+    if (loading || editingPath || error || !listing) return;
+    const affected = pendingOperationPath === listing.path || pendingNavigationRefresh === sequence;
+    pendingOperationPath = null;
+    pendingNavigationRefresh = null;
+    if (affected) void navigate({ kind: 'path', value: listing.path }, selected?.key);
   }
 
   async function commitListing(result: DirectoryListing, request: number, selection?: string, pathRevision?: number) {
@@ -125,7 +174,10 @@
       error = filesystemError(cause);
       if (listing) { sort = listing.sort; direction = listing.direction; }
     } finally {
-      if (request === sequence) loading = false;
+      if (request === sequence) {
+        loading = false;
+        refreshPendingOperation();
+      }
     }
   }
 
@@ -139,6 +191,7 @@
   function cancelPathEdit() {
     editingPath = false;
     draft = listing?.label ?? '';
+    refreshPendingOperation();
     focusList();
   }
 
@@ -223,7 +276,11 @@
       error = filesystemError(cause);
       if (listing) { sort = listing.sort; direction = listing.direction; }
     } finally {
-      if (request === sequence) { loading = false; sorting = false; }
+      if (request === sequence) {
+        loading = false;
+        sorting = false;
+        refreshPendingOperation();
+      }
     }
   }
 

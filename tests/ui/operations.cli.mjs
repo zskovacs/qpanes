@@ -18,11 +18,39 @@ async (page) => {
     window.holdMutation = false;
     window.failMutation = null;
     window.holdListing = null;
+    const callbacks = new Map(), listeners = new Map(); let next = 0, revision = 0, invalidationRevision = 0;
+    const jobs = [];
+    const emit = () => { for (const job of jobs) if (['completed','failed','cancelled'].includes(job.state) && job.invalidationRevision == null) job.invalidationRevision = ++invalidationRevision; revision++; for (const [id, item] of listeners) if (item.event === 'operations-changed') callbacks.get(item.handler)?.({ id, event: item.event, payload: revision }); };
+    window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: (_, id) => listeners.delete(id) };
+    async function mutate(request) {
+      if (window.failMutation) { const error = window.failMutation; window.failMutation = null; throw error; }
+      if (request.kind === 'create') {
+        const path = `${request.parent}/created-id`;
+        dirs[request.parent].push(entry(path, request.name, 'directory')); return { path, warnings: [] };
+      }
+      const parent = Object.keys(dirs).find(key => dirs[key].some(item => item.path === request.source.path));
+      const selected = dirs[parent]?.find(item => item.path === request.source.path);
+      if (!selected) throw { code: 'notFound', message: 'Entry disappeared.' };
+      if (request.kind === 'rename') {
+        const path = `${parent}/renamed-id${dirs[parent].some(item => item.path === `${parent}/renamed-id`) ? '-directory' : ''}`;
+        dirs[parent] = dirs[parent].map(item => item === selected ? entry(path, request.name, item.kind) : item); return { path, warnings: [] };
+      }
+      if (request.kind === 'trash') { dirs[parent] = dirs[parent].filter(item => item !== selected); return { path: null, warnings: [] }; }
+      if (request.destination === parent) throw { code: 'sameEntry', message: 'Source and destination are the same entry.' };
+      const path = `${request.destination}/${request.kind === 'copy' ? 'copied' : 'moved'}-id${dirs[request.destination].some(item => item.path === `${request.destination}/copied-id`) ? '-again' : ''}`;
+      dirs[request.destination].push(entry(path, selected.name, selected.kind));
+      if (request.kind === 'move') dirs[parent] = dirs[parent].filter(item => item !== selected);
+      return { path, warnings: [] };
+    }
     window.__TAURI_INTERNALS__ = {
-      metadata: { currentWindow: { label: 'main' } }, transformCallback: () => 0, unregisterCallback: () => {},
-      invoke: async (command, payload) => {
+      metadata: { currentWindow: { label: 'main' } },
+      transformCallback(callback) { callbacks.set(++next, callback); return next; },
+      unregisterCallback(id) { callbacks.delete(id); },
+      invoke: async (command, payload = {}) => {
         if (command.startsWith('plugin:window|')) return command.endsWith('|scale_factor') ? 1 : false;
-        if (command.startsWith('plugin:event|')) return 1;
+        if (command === 'plugin:event|listen') { listeners.set(++next, payload); return next; }
+        if (command === 'plugin:event|unlisten') { listeners.delete(payload.eventId); return; }
+        if (command === 'list_operations') return structuredClone({ revision, invalidationRevision, jobs, accepting: true, closeRequested: false, shutdownState: 'idle' });
         window.calls.push({ command, payload: structuredClone(payload) });
         if (command === 'sort_directory_entries') {
           const sign = payload.direction === 'ascending' ? 1 : -1;
@@ -31,41 +59,21 @@ async (page) => {
         const request = payload.request;
         if (command === 'list_directory') {
           const path = request.target.kind === 'home' ? '/native/left' : request.target.value;
-          const entries = (dirs[path] ?? []).map((item) => ({ ...item }));
-          if (window.holdListing === path) {
-            window.holdListing = null;
-            await new Promise((resolve) => { window.finishListing = resolve; });
-          }
+          const entries = (dirs[path] ?? []).map(item => ({ ...item }));
+          if (window.holdListing === path) { window.holdListing = null; await new Promise(resolve => { window.finishListing = resolve; }); }
           return { path, label: path.replace('/native/', '/display/'), parent: '/', entries, warnings: [], sort: request.sort, direction: request.direction };
         }
-        if (window.holdMutation) {
-          window.holdMutation = false;
-          await new Promise((resolve) => { window.finishMutation = resolve; });
-        }
-        if (window.failMutation) { const error = window.failMutation; window.failMutation = null; throw error; }
-        if (command === 'create_directory') {
-          const path = `${request.parent}/created-id`;
-          dirs[request.parent].push(entry(path, request.name, 'directory'));
-          return { path, warnings: [] };
-        }
-        const parent = Object.keys(dirs).find((key) => dirs[key].some((item) => item.path === request.source.path));
-        const selected = dirs[parent]?.find((item) => item.path === request.source.path);
-        if (!selected) throw { code: 'notFound', message: 'Entry disappeared.' };
-        if (command === 'rename_entry') {
-          const path = `${parent}/renamed-id${dirs[parent].some((item) => item.path === `${parent}/renamed-id`) ? '-directory' : ''}`;
-          dirs[parent] = dirs[parent].map((item) => item === selected ? entry(path, request.name, item.kind) : item);
-          return { path, warnings: [] };
-        }
-        if (command === 'trash_entry') {
-          dirs[parent] = dirs[parent].filter((item) => item !== selected);
-          return { path: null, warnings: [] };
-        }
-        if (command === 'copy_entry' || command === 'move_entry') {
-          if (request.destination === parent) throw { code: 'sameEntry', message: 'Source and destination are the same entry.' };
-          const path = `${request.destination}/${command === 'copy_entry' ? 'copied' : 'moved'}-id${dirs[request.destination].some((item) => item.path === `${request.destination}/copied-id`) ? '-again' : ''}`;
-          dirs[request.destination].push(entry(path, selected.name, selected.kind));
-          if (command === 'move_entry') dirs[parent] = dirs[parent].filter((item) => item !== selected);
-          return { path, warnings: [] };
+        if (command === 'submit_operation') {
+          if (window.holdMutation) { window.holdMutation = false; await new Promise(resolve => { window.finishMutation = resolve; }); }
+          const intent = structuredClone(request.intent);
+          const parent = intent.kind === 'create' ? intent.parent : Object.keys(dirs).find(key => dirs[key].some(item => item.path === intent.source.path));
+          const affected = intent.kind === 'copy' ? [intent.destination] : intent.kind === 'move' ? [parent, intent.destination] : [parent];
+          const job = { id: String(jobs.length + 1), intent, sourceLabel: parent, destinationLabel: intent.destination ?? null, affectedDirectories: affected, state: 'running', submittedMs: Date.now(), startedMs: Date.now(), completedMs: null,
+            progress: { currentItem: null, currentLabel: null, bytesProcessed: 0, totalBytes: null, completedFiles: 0, totalFiles: null, elapsedMs: 0, bytesPerSecond: null, remainingMs: null },
+            cancellable: false, cancellationRequested: false, invalidationRevision: null, result: null, error: null, retryable: false, retryOf: null };
+          try { job.result = await mutate(intent); job.state = 'completed'; }
+          catch (error) { job.error = error; job.state = 'failed'; job.retryable = true; }
+          job.completedMs = Date.now(); jobs.push(job); emit(); return structuredClone(job);
         }
         throw new Error(`Unexpected command ${command}`);
       },
@@ -79,8 +87,12 @@ async (page) => {
   const selected = (side) => list(side).locator('[aria-selected="true"] .filename').textContent();
   const focused = (locator) => locator.evaluate((el) => el === document.activeElement);
   const dialog = () => page.getByRole('dialog', { name: /^(Create directory|Rename|Copy|Move|Move to Trash)$/ });
-  const mutationCount = () => page.evaluate(() => window.calls.filter(({ command }) => !['list_directory', 'sort_directory_entries'].includes(command)).length);
-  const lastMutation = () => page.evaluate(() => window.calls.filter(({ command }) => !['list_directory', 'sort_directory_entries'].includes(command)).at(-1));
+  const mutationCount = () => page.evaluate(() => window.calls.filter(({ command }) => command === 'submit_operation').length);
+  const lastMutation = () => page.evaluate(() => {
+    const call = window.calls.filter(({ command }) => command === 'submit_operation').at(-1);
+    const intent = call.payload.request.intent;
+    return { command: { create: 'create_directory', rename: 'rename_entry', copy: 'copy_entry', move: 'move_entry', trash: 'trash_entry' }[intent.kind], payload: { request: intent }, actualCommand: call.command };
+  });
   const go = async (side, value) => { await path(side).fill(value); await path(side).press('Enter'); await ready(side); };
   const select = async (side, name) => { await list(side).locator('.file-row').filter({ has: page.locator('.filename', { hasText: name }) }).click(); };
   const closed = async () => { await page.waitForFunction(() => !document.querySelector('dialog[open]')); };
@@ -119,7 +131,7 @@ async (page) => {
   check(await dialog().getByRole('alert').isVisible() && await mutationCount() === 0, 'empty name shows validation feedback without IPC');
   await createName.fill('árvíz 🦀'); await createName.press('Enter'); await closed(); await ready('left');
   check((await lastMutation()).command === 'create_directory' && (await lastMutation()).payload.request.parent === '/native/left', 'create sends opaque active parent identity');
-  check(await selected('left') === 'árvíz 🦀' && await focused(list('left')), 'create refreshes, selects new directory and restores list focus');
+  check((await list('left').locator('.filename').allTextContents()).includes('árvíz 🦀') && await selected('left') === '[..]' && await focused(list('left')), 'background create refreshes contents, preserves current selection and returns list focus after admission');
   check(await selected('right') === 'right.txt', 'create leaves the independent opposite pane selection alone');
 
   await select('left', 'lossy �.txt');
@@ -132,7 +144,8 @@ async (page) => {
   await renameName.fill('renamed 🦀.txt'); await renameName.press('Enter'); await closed(); await ready('left');
   const rename = await lastMutation();
   check(rename.payload.request.source.path === '/native/left/file-id' && rename.payload.request.source.identity === 'identity:/native/left/file-id', 'rename preserves native source and identity despite lossy display name');
-  check(await selected('left') === 'renamed 🦀.txt', 'rename refresh selects the returned native identity');
+  check((await list('left').locator('.filename').allTextContents()).includes('renamed 🦀.txt'), 'rename completion refresh exposes the returned entry without restoring a stale selection');
+  await select('left', 'renamed 🦀.txt');
 
   const beforeCancel = await mutationCount();
   await start('left', 'F5');
@@ -151,28 +164,32 @@ async (page) => {
   await page.waitForFunction(() => typeof window.finishMutation === 'function');
   await dialog().locator('form').evaluate((form) => { form.requestSubmit(); form.requestSubmit(); });
   await dialog().press('Escape');
-  check(await dialog().isVisible() && await dialog().getByRole('status').isVisible() && await dialog().getByRole('button', { name: 'Cancel' }).isDisabled(), 'busy state is visible and cannot be dismissed during execution');
+  check(await dialog().isVisible() && await dialog().getByRole('status').isVisible() && await dialog().getByRole('button', { name: 'Cancel' }).isDisabled(), 'admission busy state is visible and cannot be dismissed before submission is acknowledged');
   check(await mutationCount() === beforeCancel + 1, 'repeated submission cannot execute a duplicate mutation');
   await page.evaluate(() => { window.finishMutation(); delete window.finishMutation; });
   await closed(); await ready('right');
   const copy = await lastMutation();
   check(copy.command === 'copy_entry' && copy.payload.request.source.path === '/native/left/renamed-id' && copy.payload.request.destination === '/native/right', 'F5 copies active real source into the opposite native directory');
-  check(await selected('right') === 'renamed 🦀.txt' && await selected('left') === 'renamed 🦀.txt', 'copy selects the destination and preserves the source selection');
+  check((await list('right').locator('.filename').allTextContents()).includes('renamed 🦀.txt') && await selected('right') === 'right.txt' && await selected('left') === 'renamed 🦀.txt', 'background copy refresh preserves both current selections');
   check(await focused(list('left')), 'copy completion restores the source list focus');
 
   await page.evaluate(() => { window.failMutation = { code: 'permissionDenied', message: 'Permission denied. Source remains intact.' }; });
   await start('right', 'F6'); await dialog().getByRole('button', { name: 'Move', exact: true }).press('Enter');
-  await dialog().getByRole('alert').waitFor();
-  check((await dialog().getByRole('alert').textContent()).includes('Source remains intact.'), 'structured operation errors remain visible in the confirmation dialog');
-  check(await focused(dialog().getByRole('button', { name: 'Move', exact: true })), 'failure restores focus to the enabled confirmation control');
+  await closed();
+  check(await focused(list('right')), 'admission returns focus immediately even when execution later fails');
+  await page.getByRole('button', { name: /Operations/ }).click();
+  const failed = page.locator('.operation-job.failed');
+  await failed.waitFor();
+  check((await failed.textContent()).includes('Source remains intact.'), 'structured execution errors remain visible in Operations after the confirmation closes');
   const failedMove = await lastMutation();
-  check(failedMove.command === 'move_entry' && failedMove.payload.request.source.path === '/native/right/copied-id' && failedMove.payload.request.destination === '/native/left', 'right-active move reverses source and destination correctly');
-  await cancel();
-  check(await focused(list('right')) && await path('right').inputValue() === '/display/right', 'error cancellation returns focus without losing directory navigation');
+  check(failedMove.command === 'move_entry' && failedMove.payload.request.source.path === '/native/right/right-id' && failedMove.payload.request.destination === '/native/left', 'right-active move captures native source and destination correctly');
+  check(await focused(page.getByRole('button', { name: /Operations/ })) && await path('right').inputValue() === '/display/right', 'execution errors preserve the control focus deliberately chosen afterward and directory navigation');
+  await page.getByRole('button', { name: /Operations/ }).click();
+  await select('right', 'renamed 🦀.txt');
 
   await start('right', 'F6'); await dialog().getByRole('button', { name: 'Move', exact: true }).press('Enter');
   await closed(); await ready('left'); await ready('right');
-  check(await selected('left') === 'renamed 🦀.txt' && !(await list('right').locator('.filename').allTextContents()).includes('renamed 🦀.txt'), 'move refreshes both panels and selects its returned destination identity');
+  check(await selected('left') === 'renamed 🦀.txt' && !(await list('right').locator('.filename').allTextContents()).includes('renamed 🦀.txt'), 'move refreshes both panels while preserving a surviving current selection');
   await start('right', 'Delete'); await dialog().getByRole('button', { name: 'Move to Trash', exact: true }).press('Enter');
   await closed(); await ready('right');
   check((await lastMutation()).command === 'trash_entry' && await selected('right') === '[..]', 'confirmed Trash refreshes the source and gives an empty pane a valid parent selection');
@@ -202,7 +219,7 @@ async (page) => {
   await dialog().getByRole('textbox', { name: 'New name' }).fill('Renamed folder');
   await dialog().getByRole('textbox', { name: 'New name' }).press('Enter');
   await closed(); await ready('left'); await ready('right');
-  check(await selected('left') === 'Renamed folder' && await selected('right') === 'Renamed folder', 'rename refreshes both panels when both display the affected directory');
+  check((await list('left').locator('.filename').allTextContents()).includes('Renamed folder') && (await list('right').locator('.filename').allTextContents()).includes('Renamed folder'), 'rename refreshes both panels displaying the affected directory without navigation');
   await panel('left').getByRole('button', { name: 'Sort left by name, ascending', exact: true }).click(); await ready('left');
   check(await panel('left').getByRole('button', { name: 'Sort left by name, descending', exact: true }).getAttribute('aria-pressed') === 'true', 'sorting still works after operations');
   await list('left').press('Home'); await list('left').press('ArrowDown');
@@ -216,5 +233,6 @@ async (page) => {
   await page.screenshot({ path: 'test-results/slice-002-compact-mocked.png' });
   await cancel();
   check(errors.length === 0, `no renderer runtime errors (${errors.join(', ')})`);
-  return { mode: 'MOCKED IPC Slice 002 renderer verification', passed: passed.length, checks: passed };
+  check(await page.evaluate(() => window.calls.every(({ command }) => !['copy_entry', 'move_entry', 'rename_entry', 'create_directory', 'trash_entry'].includes(command))), 'all renderer mutations use only manager submission IPC');
+  return { mode: 'MOCKED IPC Slice 002 regressions through Slice 003 manager contracts', passed: passed.length, checks: passed };
 }

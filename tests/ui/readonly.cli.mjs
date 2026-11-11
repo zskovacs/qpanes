@@ -24,6 +24,7 @@ async (page) => {
       invoke: async (command, payload) => {
         if (command.startsWith('plugin:window|')) return command.endsWith('|scale_factor') ? 1 : false;
         if (command.startsWith('plugin:event|')) return 1;
+        if (command === 'list_operations') return { revision: 0, invalidationRevision: 0, jobs: [], accepting: true, closeRequested: false, shutdownState: 'idle' };
         if (!['list_directory', 'sort_directory_entries'].includes(command)) throw new Error(`Unexpected command ${command}`);
         const request = command === 'list_directory' ? payload.request : payload;
         window.ipcRequests.push(request);

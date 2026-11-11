@@ -22,6 +22,7 @@ async (page) => {
         c.requests.push({ command, payload });
         if (command === 'plugin:event|listen') { listeners.set(++id, payload); return id; }
         if (command === 'plugin:event|unlisten') return;
+        if (command === 'list_operations') return { revision: 0, invalidationRevision: 0, jobs: [], accepting: true, closeRequested: false, shutdownState: 'idle' };
         if (command.startsWith('plugin:window|')) {
           const name = command.split('|')[1];
           if (c.fail === name) throw new Error('Simulated native action failure');

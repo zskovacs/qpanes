@@ -1,41 +1,90 @@
-use qpanes_core::{
-    CreateDirectoryRequest, DirectoryListing, Entry, FsError, ListRequest, OperationResult,
-    RenameRequest, SortDirection, SortKey, TransferRequest, TrashRequest,
+use qpanes_core::operation_manager::{
+    OperationJob, OperationManager, OperationSnapshot, ShutdownAttempt, SubmitRequest,
 };
+use qpanes_core::{DirectoryListing, Entry, FsError, ListRequest, SortDirection, SortKey};
+use serde::Deserialize;
+use tauri::{Emitter, Manager, State};
 
 #[tauri::command]
-async fn create_directory(request: CreateDirectoryRequest) -> Result<OperationResult, FsError> {
-    tauri::async_runtime::spawn_blocking(move || qpanes_core::create_directory(request))
-        .await
-        .map_err(|_| FsError::operation_unavailable())?
+fn submit_operation(
+    manager: State<'_, OperationManager>,
+    request: SubmitRequest,
+) -> Result<OperationJob, FsError> {
+    manager.submit(request)
 }
-
 #[tauri::command]
-async fn rename_entry(request: RenameRequest) -> Result<OperationResult, FsError> {
-    tauri::async_runtime::spawn_blocking(move || qpanes_core::rename_entry(request))
-        .await
-        .map_err(|_| FsError::operation_unavailable())?
+fn list_operations(manager: State<'_, OperationManager>) -> OperationSnapshot {
+    manager.snapshot()
 }
-
 #[tauri::command]
-async fn copy_entry(request: TransferRequest) -> Result<OperationResult, FsError> {
-    tauri::async_runtime::spawn_blocking(move || qpanes_core::copy_entry(request))
-        .await
-        .map_err(|_| FsError::operation_unavailable())?
+fn get_operation(
+    manager: State<'_, OperationManager>,
+    id: String,
+) -> Result<OperationJob, FsError> {
+    manager.get(&id)
 }
-
 #[tauri::command]
-async fn move_entry(request: TransferRequest) -> Result<OperationResult, FsError> {
-    tauri::async_runtime::spawn_blocking(move || qpanes_core::move_entry(request))
-        .await
-        .map_err(|_| FsError::operation_unavailable())?
+fn cancel_operation(
+    manager: State<'_, OperationManager>,
+    id: String,
+) -> Result<OperationJob, FsError> {
+    manager.cancel(&id)
 }
-
 #[tauri::command]
-async fn trash_entry(request: TrashRequest) -> Result<OperationResult, FsError> {
-    tauri::async_runtime::spawn_blocking(move || qpanes_core::trash_entry(request))
-        .await
-        .map_err(|_| FsError::operation_unavailable())?
+fn retry_operation(
+    manager: State<'_, OperationManager>,
+    id: String,
+    client_id: String,
+    sequence: u32,
+) -> Result<OperationJob, FsError> {
+    manager.retry(&id, client_id, sequence)
+}
+#[tauri::command]
+fn dismiss_operation(manager: State<'_, OperationManager>, id: String) -> Result<(), FsError> {
+    manager.dismiss(&id)
+}
+#[tauri::command]
+fn classify_operation_invalidation(
+    paths: Vec<qpanes_core::NativePath>,
+    directories: Vec<qpanes_core::NativePath>,
+    subtrees: Vec<qpanes_core::NativePath>,
+) -> Result<Vec<bool>, FsError> {
+    qpanes_core::classify_operation_invalidation(&paths, &directories, &subtrees)
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum ShutdownAction {
+    KeepWorking,
+    CancelAndClose,
+    ForceExit,
+}
+#[tauri::command]
+fn shutdown_operations(
+    app: tauri::AppHandle,
+    manager: State<'_, OperationManager>,
+    action: ShutdownAction,
+    attempt: Option<ShutdownAttempt>,
+) -> Result<(), FsError> {
+    match action {
+        ShutdownAction::KeepWorking => manager.keep_working(attempt.as_ref())?,
+        ShutdownAction::CancelAndClose => {
+            if let Some(attempt) =
+                manager.begin_shutdown(std::time::Duration::from_secs(3), attempt.as_ref())?
+            {
+                let manager = manager.inner().clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    if manager.wait_shutdown(&attempt) && manager.finish_shutdown(&attempt) {
+                        app.exit(0);
+                    }
+                });
+            }
+        }
+        ShutdownAction::ForceExit => {
+            manager.authorize_force_exit(attempt.as_ref())?;
+            app.exit(0);
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -64,21 +113,75 @@ async fn sort_directory_entries(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            let handle = app.handle().clone();
+            let manager = OperationManager::new(move |revision| {
+                // Events are low-frequency hints; list_operations is authoritative.
+                let _ = handle.emit_to("main", "operations-changed", revision);
+            })?;
+            app.manage(manager);
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event
+                && !window.state::<OperationManager>().request_close()
+            {
+                api.prevent_close();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             list_directory,
             sort_directory_entries,
-            create_directory,
-            rename_entry,
-            copy_entry,
-            move_entry,
-            trash_entry
+            submit_operation,
+            list_operations,
+            get_operation,
+            cancel_operation,
+            retry_operation,
+            dismiss_operation,
+            shutdown_operations,
+            classify_operation_invalidation
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { api, .. } = event
+                && !app.state::<OperationManager>().request_close()
+            {
+                api.prevent_exit();
+            }
+        });
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn managed_submission_rejects_virtual_parent_and_forged_result() {
+        let request = serde_json::json!({
+            "clientId": "renderer", "sequence": 1,
+            "intent": { "kind": "trash", "source": { "kind": "parent", "key": "parent" } }
+        });
+        assert!(serde_json::from_value::<super::SubmitRequest>(request).is_err());
+        let forged = serde_json::json!({
+            "clientId": "renderer", "sequence": 1,
+            "intent": { "kind": "create", "parent": "u:2f746d70", "name": "fixture", "state": "completed" }
+        });
+        assert!(serde_json::from_value::<super::SubmitRequest>(forged).is_err());
+    }
+
+    #[test]
+    fn managed_snapshot_wire_names_match_renderer_contract() {
+        let manager = super::OperationManager::new(|_| {}).unwrap();
+        let snapshot = serde_json::to_value(manager.snapshot()).unwrap();
+        assert_eq!(snapshot["revision"], 0);
+        assert_eq!(snapshot["invalidationRevision"], 0);
+        assert_eq!(snapshot["shutdownState"], "idle");
+        assert_eq!(snapshot["closeRequested"], false);
+        assert_eq!(snapshot["accepting"], true);
+        assert_eq!(snapshot["jobs"], serde_json::json!([]));
+        let error = serde_json::to_value(qpanes_core::FsError::operation_unavailable()).unwrap();
+        assert!(error["recovery"].is_null());
+    }
+
     #[test]
     fn virtual_parent_is_not_a_filesystem_entry() {
         let parent = serde_json::json!({

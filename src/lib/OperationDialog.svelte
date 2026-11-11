@@ -3,15 +3,16 @@
 </script>
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import { filesystemError, type FilesystemError, type OperationResult } from './filesystem';
+  import { filesystemError, type FilesystemError } from './filesystem';
+  import type { OperationJob } from './operations';
 
   let { kind, sourceName, sourceLocation, destinationLocation, execute, oncomplete, oncancel }: {
     kind: OperationKind;
     sourceName?: string;
     sourceLocation: string;
     destinationLocation?: string;
-    execute: (name: string) => Promise<OperationResult>;
-    oncomplete: (result: OperationResult) => void;
+    execute: (name: string) => Promise<OperationJob>;
+    oncomplete: (result: OperationJob) => void;
     oncancel: () => void;
   } = $props();
   const titles: Record<OperationKind, string> = {
@@ -107,10 +108,10 @@
         aria-invalid={!!error} aria-describedby={error ? 'operation-error' : undefined} oninput={() => { error = null; }} />
     {/if}
     {#if error}<div class="operation-error" id="operation-error" role="alert"><strong>{error.code}</strong><span>{error.message}</span></div>{/if}
-    {#if busy}<p class="busy-message" role="status">{title} in progress…</p>{/if}
+    {#if busy}<p class="busy-message" role="status">Submitting {title.toLowerCase()}…</p>{/if}
     <div class="dialog-actions">
       <button type="button" disabled={busy} onclick={cancel}>Cancel</button>
-      <button bind:this={confirmButton} class="confirm" type="submit" disabled={busy}>{busy ? 'Working…' : title}</button>
+      <button bind:this={confirmButton} class="confirm" type="submit" disabled={busy}>{busy ? 'Submitting…' : title}</button>
     </div>
   </form>
 </dialog>

@@ -1,5 +1,8 @@
 <script module lang="ts">
   export type OperationKind = 'create' | 'rename' | 'copy' | 'move' | 'trash';
+  /** A drop asks for an explicit Copy or Move choice before anything is submitted. */
+  export type DialogKind = OperationKind | 'transfer';
+  export type TransferChoice = 'copy' | 'move';
 </script>
 <script lang="ts">
   import { onMount, tick } from 'svelte';
@@ -7,16 +10,16 @@
   import type { OperationJob } from './operations';
 
   let { kind, sourceName, sourceLocation, destinationLocation, execute, oncomplete, oncancel }: {
-    kind: OperationKind;
+    kind: DialogKind;
     sourceName?: string;
     sourceLocation: string;
     destinationLocation?: string;
-    execute: (name: string) => Promise<OperationJob>;
+    execute: (name: string, choice: TransferChoice | null) => Promise<OperationJob>;
     oncomplete: (result: OperationJob) => void;
     oncancel: () => void;
   } = $props();
-  const titles: Record<OperationKind, string> = {
-    create: 'Create directory', rename: 'Rename', copy: 'Copy', move: 'Move', trash: 'Move to Trash',
+  const titles: Record<DialogKind, string> = {
+    create: 'Create directory', rename: 'Rename', copy: 'Copy', move: 'Move', trash: 'Move to Trash', transfer: 'Copy or move',
   };
   let title = $derived(titles[kind]);
   let hasName = $derived(kind === 'create' || kind === 'rename');
@@ -25,7 +28,8 @@
   let error = $state<FilesystemError | null>(null);
   let dialog: HTMLDialogElement;
   let nameInput = $state<HTMLInputElement>();
-  let confirmButton: HTMLButtonElement;
+  let confirmButton = $state<HTMLButtonElement>();
+  let submitted = $state<TransferChoice | null>(null);
 
   onMount(() => {
     name = kind === 'rename' ? sourceName ?? '' : '';
@@ -36,7 +40,7 @@
       nameInput.focus();
       nameInput.select();
     }
-    else confirmButton.focus();
+    else confirmButton?.focus();
   });
 
   function cancel() {
@@ -48,6 +52,11 @@
   async function submit(event: SubmitEvent) {
     event.preventDefault();
     if (busy) return;
+    const value = (event.submitter as HTMLButtonElement | null)?.value;
+    const choice: TransferChoice | null = kind !== 'transfer' ? null : value === 'move' ? 'move' : value === 'copy' ? 'copy' : null;
+    // A transfer is only ever submitted through an explicit Copy or Move button.
+    if (kind === 'transfer' && !choice) return;
+    submitted = choice;
     if (hasName && !name) {
       error = { code: 'invalidName', message: 'Enter a name.' };
       nameInput?.focus();
@@ -56,7 +65,7 @@
     busy = true;
     error = null;
     try {
-      const result = await execute(name);
+      const result = await execute(name, choice);
       dialog.close();
       oncomplete(result);
     } catch (cause) {
@@ -65,7 +74,7 @@
       await tick();
       if (dialog.open) {
         if (hasName) nameInput?.focus();
-        else confirmButton.focus();
+        else confirmButton?.focus();
       }
     } finally {
       busy = false;
@@ -90,6 +99,8 @@
     <div id="operation-description">
       {#if kind === 'create'}
         <p>Create a new directory in this location.</p>
+      {:else if kind === 'transfer'}
+        <p>You dropped <strong>{sourceName}</strong> on the opposite panel. Choose Copy or Move; nothing has changed yet.</p>
       {:else if kind === 'trash'}
         <p>Move <strong>{sourceName}</strong> to the operating system’s Trash?</p>
         <p class="dialog-note">You can restore it from Trash. QPanes will report an error if Trash is unavailable.</p>
@@ -100,7 +111,7 @@
         <dt>{kind === 'create' ? 'Location' : 'Source location'}</dt><dd>{sourceLocation}</dd>
         {#if destinationLocation}<dt>Destination location</dt><dd>{destinationLocation}</dd>{/if}
       </dl>
-      {#if kind === 'copy' || kind === 'move'}<p class="dialog-note">Existing destinations will be rejected.</p>{/if}
+      {#if kind === 'copy' || kind === 'move' || kind === 'transfer'}<p class="dialog-note">Existing destinations will be rejected.</p>{/if}
     </div>
     {#if hasName}
       <label class="name-label" for="operation-name">{kind === 'create' ? 'Directory name' : 'New name'}</label>
@@ -108,10 +119,15 @@
         aria-invalid={!!error} aria-describedby={error ? 'operation-error' : undefined} oninput={() => { error = null; }} />
     {/if}
     {#if error}<div class="operation-error" id="operation-error" role="alert"><strong>{error.code}</strong><span>{error.message}</span></div>{/if}
-    {#if busy}<p class="busy-message" role="status">Submitting {title.toLowerCase()}…</p>{/if}
+    {#if busy}<p class="busy-message" role="status">Submitting {kind === 'transfer' ? submitted : title.toLowerCase()}…</p>{/if}
     <div class="dialog-actions">
       <button type="button" disabled={busy} onclick={cancel}>Cancel</button>
-      <button bind:this={confirmButton} class="confirm" type="submit" disabled={busy}>{busy ? 'Submitting…' : title}</button>
+      {#if kind === 'transfer'}
+        <button class="confirm" type="submit" value="move" disabled={busy}>{busy && submitted === 'move' ? 'Submitting…' : 'Move'}</button>
+        <button bind:this={confirmButton} class="confirm" type="submit" value="copy" disabled={busy}>{busy && submitted === 'copy' ? 'Submitting…' : 'Copy'}</button>
+      {:else}
+        <button bind:this={confirmButton} class="confirm" type="submit" disabled={busy}>{busy ? 'Submitting…' : title}</button>
+      {/if}
     </div>
   </form>
 </dialog>

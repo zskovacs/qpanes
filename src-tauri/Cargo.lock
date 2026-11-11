@@ -2740,6 +2740,7 @@ dependencies = [
  "cap-std",
  "rustix",
  "serde",
+ "serde_json",
  "trash",
  "windows-sys 0.61.2",
 ]

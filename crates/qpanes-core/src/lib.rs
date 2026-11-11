@@ -12,6 +12,7 @@ mod invalidation;
 pub use invalidation::classify_operation_invalidation;
 pub mod operation_manager;
 mod operations;
+pub mod settings;
 pub use operations::{
     CopyObserver, CopyProgress, CreateDirectoryRequest, OperationResult, RenameRequest,
     TransferRequest, TrashRequest, copy_entry, copy_entry_observed, create_directory, move_entry,
@@ -24,6 +25,11 @@ pub use operations::{
 pub struct NativePath(String);
 
 impl NativePath {
+    /// The opaque identifier text. Never parse it outside this crate.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
     pub fn from_path(path: &Path) -> Self {
         #[cfg(unix)]
         {
@@ -171,6 +177,8 @@ pub struct Entry {
 pub struct DirectoryListing {
     pub path: NativePath,
     pub label: String,
+    /// Lossy final component for display (the full label for a root).
+    pub name: String,
     pub parent: Option<NativePath>,
     pub entries: Vec<Entry>,
     pub warnings: Vec<String>,
@@ -207,6 +215,7 @@ pub enum ErrorCode {
     StorageFull,
     ReadFailed,
     WriteFailed,
+    InvalidSettings,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -301,15 +310,71 @@ pub fn list_directory(request: ListRequest) -> Result<DirectoryListing, FsError>
         }
     }
     sort_entries(&mut entries, request.sort, request.direction);
+    let label = directory.to_string_lossy().into_owned();
     Ok(DirectoryListing {
         path: NativePath::from_path(&directory),
-        label: directory.to_string_lossy().into_owned(),
+        name: directory
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| label.clone()),
+        label,
         parent: directory.parent().map(NativePath::from_path),
         entries,
         warnings,
         sort: request.sort,
         direction: request.direction,
     })
+}
+
+/// Availability of a remembered directory. Never follows display labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DirectoryStatus {
+    Available,
+    Missing,
+    NotDirectory,
+    PermissionDenied,
+    Invalid,
+    Unreadable,
+}
+
+/// Upper bound for one availability probe request.
+pub const MAX_PROBE_PATHS: usize = 256;
+
+/// Classify remembered directories without enumerating them. Call from a
+/// blocking worker: each item performs a metadata read and directory open.
+pub fn probe_directories(paths: &[NativePath]) -> Result<Vec<DirectoryStatus>, FsError> {
+    if paths.len() > MAX_PROBE_PATHS {
+        return Err(FsError {
+            code: ErrorCode::InvalidOperation,
+            message: format!("At most {MAX_PROBE_PATHS} directories can be checked at once."),
+            recovery: None,
+        });
+    }
+    Ok(paths.iter().map(probe_directory).collect())
+}
+
+fn probe_directory(path: &NativePath) -> DirectoryStatus {
+    let Ok(path) = path.to_path() else {
+        return DirectoryStatus::Invalid;
+    };
+    if !path.is_absolute() {
+        return DirectoryStatus::Invalid;
+    }
+    let status = |error: io::Error| match error.kind() {
+        io::ErrorKind::NotFound => DirectoryStatus::Missing,
+        io::ErrorKind::PermissionDenied => DirectoryStatus::PermissionDenied,
+        io::ErrorKind::NotADirectory => DirectoryStatus::NotDirectory,
+        _ => DirectoryStatus::Unreadable,
+    };
+    match fs::metadata(&path) {
+        Ok(metadata) if !metadata.is_dir() => DirectoryStatus::NotDirectory,
+        Ok(_) => match fs::read_dir(&path) {
+            Ok(_) => DirectoryStatus::Available,
+            Err(error) => status(error),
+        },
+        Err(error) => status(error),
+    }
 }
 
 fn read_entry(path: PathBuf, name: String) -> Entry {

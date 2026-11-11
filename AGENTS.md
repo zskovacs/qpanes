@@ -30,7 +30,7 @@ QPanes is a lightweight, keyboard-first, cross-platform, dual-pane desktop file 
 ## Development discipline
 
 - Work one approved slice at a time. Do not add terminal, MCP, remote filesystems, plugins, or write operations in Slice 001.
-- Before implementation of a significant slice, use Superpowers brainstorming and planning; obtain approval of the slice design/plan. GOAL mode is for verified implementation against that approved scope.
+- Before implementation of a significant slice, record a reviewable slice design/plan in `docs/slices/` using the coding agent's native planning and task tracking; Superpowers is no longer required. Obtain approval of that design/plan unless the user explicitly authorizes proceeding directly to implementation. GOAL mode is for verified implementation against that approved scope.
 - Prefer existing maintained libraries where they reduce risk, but verify current APIs and licenses; don't invent dependencies. Avoid copying GPL code into this project.
 - No destructive tests against real user files. Use generated temporary fixtures for all write/delete tests in future slices.
 - Never change unrelated files; never add secrets or credentials to the repo. Do not disable security controls to simplify testing.

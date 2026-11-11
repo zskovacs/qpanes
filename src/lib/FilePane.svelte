@@ -1,40 +1,56 @@
 <script module lang="ts">
   import { classifyOperationInvalidation } from './operations';
   import type { FileEntry, NativePath } from './filesystem';
+  import type { TabSeed } from './tabs';
   export interface PaneSnapshot {
     path: NativePath;
     label: string;
+    name: string;
     revision: number;
     entry: FileEntry | null;
   }
+  /** A real file or directory row offered for dragging. `select` makes it the
+   * pane selection and returns a fresh snapshot, or null if no longer valid. */
+  export interface DragRequest { event: PointerEvent; entry: FileEntry; select: () => PaneSnapshot | null }
+  export type DropState = 'valid' | 'invalid' | null;
 </script>
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import Icon from './Icon.svelte';
   import { listDirectory, sortDirectoryEntries, filesystemError, type DirectoryListing, type DirectoryTarget, type FilesystemError, type SortKey, type SortDirection } from './filesystem';
+  import { filterKey, matchingIndices } from './filter';
   import { formatDate, formatSize, kindLabel } from './format';
 
-  let { side, active, onactivate, onswitch }: {
-    side: 'left' | 'right'; active: boolean; onactivate: () => void; onswitch: () => void;
+  let { side, tabId, active, visible, initial, hints, dropState = null, draggingPath = null, onswitch, onlocation, onfavorites, ondragrequest }: {
+    side: 'left' | 'right'; tabId: number; active: boolean; visible: boolean; initial: TabSeed;
+    hints: { quickFilter: string; openFavorites: string };
+    dropState?: DropState; draggingPath?: NativePath | null;
+    onswitch: () => void; onlocation: (seed: TabSeed) => void; onfavorites: () => void; ondragrequest: (request: DragRequest) => void;
   } = $props();
   let listing = $state.raw<DirectoryListing | null>(null);
   let loading = $state(true);
   let sorting = $state(false);
   let error = $state<FilesystemError | null>(null);
-  let draft = $state('');
-  let sort = $state<SortKey>('name');
-  let direction = $state<SortDirection>('ascending');
+  // A restored location stays visible while it loads or if it is unavailable.
+  let draft = $state(untrack(() => initial.location));
+  let sort = $state<SortKey>(untrack(() => initial.sort));
+  let direction = $state<SortDirection>(untrack(() => initial.direction));
   let selectedIndex = $state(-1);
   let scrollTop = $state(0);
+  // Hidden tabs report zero height; keep the last visible measurement.
   let height = $state(400);
   let note = $state('');
   let detailsOpen = $state(false);
+  let filter = $state('');
+  let filterOpen = $state(false);
   let listElement: HTMLDivElement;
   let pathInput: HTMLInputElement;
+  let filterInput = $state<HTMLInputElement>();
   let detailsSummary: HTMLElement;
   let errorSummary = $state<HTMLElement>();
   let sequence = 0;
   let disposed = false;
+  let started = false;
   let navigationRevision = 0;
   let draftRevision = 0;
   let editingPath = false;
@@ -43,47 +59,65 @@
   const rowHeight = 32;
   const overscan = 8;
   const number = new Intl.NumberFormat();
+  const viewId = $derived(`${side}-${tabId}`);
   // A parent action cannot be mistaken for a real FileEntry or sent to file IPC.
   type PaneRow = { kind: 'parent'; key: 'parent' } | { kind: 'entry'; key: string; entry: FileEntry };
   const entryKey = (path: NativePath) => `entry:${path}`;
   let entries = $derived(listing?.entries ?? []);
+  // Normalized once per listing; filtering never re-reads the directory.
+  let filterKeys = $derived(entries.map((entry) => filterKey(entry.name)));
+  let matched = $derived(filter ? matchingIndices(filterKeys, filter).map((index) => entries[index]) : entries);
   let rows = $derived.by((): PaneRow[] => [
     ...(listing?.parent ? [{ kind: 'parent' as const, key: 'parent' as const }] : []),
-    ...entries.map((entry): PaneRow => ({ kind: 'entry', key: entryKey(entry.path), entry })),
+    ...matched.map((entry): PaneRow => ({ kind: 'entry', key: entryKey(entry.path), entry })),
   ]);
   let selected = $derived(rows[selectedIndex]);
   let selectedEntry = $derived(selected?.kind === 'entry' ? selected.entry : undefined);
   let selectedName = $derived(selected?.kind === 'parent' ? '[..]' : selectedEntry?.name);
   let start = $derived(Math.max(0, Math.floor(scrollTop / rowHeight) - overscan));
   let end = $derived(Math.min(rows.length, Math.ceil((scrollTop + height) / rowHeight) + overscan));
-  let visible = $derived(rows.slice(start, end));
-  let activeDescendant = $derived(selectedIndex >= start && selectedIndex < end ? `${side}-entry-${selectedIndex}` : undefined);
+  let visibleRows = $derived(rows.slice(start, end));
+  let activeDescendant = $derived(selectedIndex >= start && selectedIndex < end ? `${viewId}-entry-${selectedIndex}` : undefined);
   let folders = $derived(entries.filter((entry) => entry.kind === 'directory').length);
 
-  onMount(() => {
-    void navigate({ kind: 'home' });
-    return () => { disposed = true; sequence++; };
+  $effect(() => () => { disposed = true; sequence++; });
+
+  // Restored inactive tabs load on first display; a shown tab re-applies its
+  // logical scroll because a hidden element has no scroll box.
+  $effect(() => {
+    if (!visible) return;
+    untrack(() => {
+      if (!started) {
+        started = true;
+        void navigate(initial.path ? { kind: 'path', value: initial.path } : { kind: 'home' });
+      }
+      if (listElement) listElement.scrollTop = scrollTop;
+    });
   });
 
   export function focusList() { listElement?.focus(); }
   export function editPath() { pathInput?.focus(); pathInput?.select(); }
+  export function openLocation(path: NativePath) { void navigate({ kind: 'path', value: path }); }
 
   /** A parent action has no FileEntry and cannot enter an operation request. */
   export function operationSnapshot(): PaneSnapshot | null {
     if (!listing || loading || error || editingPath) return null;
-    return { path: listing.path, label: listing.label, revision: navigationRevision, entry: selectedEntry ?? null };
+    return { path: listing.path, label: listing.label, name: listing.name || listing.label, revision: navigationRevision, entry: selectedEntry ?? null };
   }
 
-  /** Never let an operation completion navigate back over newer user intent. */
-  export function refreshAfterOperation(snapshot: PaneSnapshot, selection?: NativePath | null) {
-    if (!listing || snapshot.revision !== navigationRevision || snapshot.path !== listing.path) return;
-    void navigate({ kind: 'path', value: listing.path }, selection ? entryKey(selection) : selected?.key);
+  export async function openFilter() {
+    filterOpen = true;
+    await tick();
+    filterInput?.focus();
+    filterInput?.select();
   }
 
   // Retain at most the displayed path and one in-flight navigation revision.
   let pendingOperationPath: NativePath | null = null;
   let pendingNavigationRefresh: number | null = null;
   export function refreshAffectedDirectories(paths: NativePath[], subtrees: NativePath[] = [], unknownChanges = false) {
+    // A tab that has never been displayed reads fresh data when first shown.
+    if (!started) return;
     // A history gap has no recoverable path set. Re-read only this pane's
     // current/arriving location through the existing deferred refresh guards.
     if (listing && (unknownChanges || paths.includes(listing.path))) pendingOperationPath = listing.path;
@@ -127,6 +161,13 @@
     if (affected) void navigate({ kind: 'path', value: listing.path }, selected?.key);
   }
 
+  /** Select by key within the (possibly filtered) rows, else the first real entry, else `[..]`. */
+  function selectKey(key: string | undefined) {
+    const offset = listing?.parent ? 1 : 0;
+    const match = key ? rows.findIndex((row) => row.key === key) : -1;
+    selectedIndex = match >= 0 ? match : rows.length > offset ? offset : offset ? 0 : -1;
+  }
+
   async function commitListing(result: DirectoryListing, request: number, selection?: string, pathRevision?: number) {
     // Sort preferences may change repeatedly while either IPC operation is pending.
     // Keep the destination and sort the returned data, never re-read the old path.
@@ -144,18 +185,18 @@
       draft = result.label;
       editingPath = false;
     }
-    const offset = result.parent ? 1 : 0;
-    const match = selection ? result.entries.findIndex((entry) => entryKey(entry.path) === selection) : -1;
-    selectedIndex = selection === 'parent' && offset ? 0
-      : match >= 0 ? match + offset
-      : result.entries.length ? offset : offset ? 0 : -1;
+    selectKey(selection);
     scrollTop = 0;
-    listElement.scrollTop = 0;
+    if (visible) listElement.scrollTop = 0;
+    onlocation({ path: result.path, location: result.label, name: result.name || result.label, sort: result.sort, direction: result.direction });
     await tick();
     if (request === sequence) revealSelection();
   }
 
   async function navigate(target: DirectoryTarget, selection?: string) {
+    // A filter belongs to the directory it was typed for; refreshes keep it.
+    if (!(target.kind === 'path' && target.value === listing?.path)) clearFilter();
+    started = true;
     navigationRevision++;
     const request = ++sequence;
     const pathRevision = draftRevision;
@@ -190,7 +231,7 @@
 
   function cancelPathEdit() {
     editingPath = false;
-    draft = listing?.label ?? '';
+    draft = listing?.label ?? untrack(() => initial.location);
     refreshPendingOperation();
     focusList();
   }
@@ -223,8 +264,11 @@
   function revealSelection() {
     if (selectedIndex < 0 || !listElement) return;
     const top = selectedIndex * rowHeight;
-    if (top < listElement.scrollTop) listElement.scrollTop = top;
-    else if (top + rowHeight > listElement.scrollTop + height) listElement.scrollTop = top + rowHeight - height;
+    let next = scrollTop;
+    if (top < next) next = top;
+    else if (top + rowHeight > next + height) next = top + rowHeight - height;
+    if (!visible) { scrollTop = next; return; }
+    listElement.scrollTop = next;
     scrollTop = listElement.scrollTop;
   }
 
@@ -248,7 +292,7 @@
   }
 
   function refresh() {
-    void navigate(listing ? { kind: 'path', value: listing.path } : { kind: 'home' }, selected?.key);
+    void navigate(listing ? { kind: 'path', value: listing.path } : retryIntent.target, selected?.key);
   }
 
   function changeSort(key: SortKey) {
@@ -287,9 +331,59 @@
   function submitPath(event: SubmitEvent) {
     event.preventDefault();
     editingPath = false;
-    // An unchanged lossy label is never reinterpreted as a native identifier.
-    void navigate(listing && draft === listing.label ? { kind: 'path', value: listing.path } : { kind: 'typed', value: draft });
+    // An unchanged lossy label is never reinterpreted as a native identifier,
+    // including the remembered location of an unavailable restored tab.
+    const restored = untrack(() => initial);
+    const native = listing ? (draft === listing.label ? listing.path : null) : restored.path && draft === restored.location ? restored.path : null;
+    void navigate(native ? { kind: 'path', value: native } : { kind: 'typed', value: draft });
     focusList();
+  }
+
+  function changeFilter(event: Event & { currentTarget: HTMLInputElement }) {
+    // Keep a real entry that still matches; otherwise select the first match.
+    const key = selected?.kind === 'entry' ? selected.key : undefined;
+    filter = event.currentTarget.value;
+    selectKey(key);
+    note = '';
+    revealSelection();
+  }
+
+  /** Clearing never strands focus: an owned filter input hands it to the list. */
+  function clearFilter() {
+    if (!filter && !filterOpen) return;
+    if (filterInput && document.activeElement === filterInput) focusList();
+    const key = selected?.key;
+    filter = '';
+    filterOpen = false;
+    if (listing) { selectKey(key); revealSelection(); }
+  }
+
+  function closeFilter() {
+    focusList();
+    clearFilter();
+  }
+
+  function filterKeydown(event: KeyboardEvent) {
+    const page = Math.max(1, Math.floor(height / rowHeight));
+    const moves: Record<string, number> = { ArrowDown: 1, ArrowUp: -1, PageDown: page, PageUp: -page };
+    if (event.altKey || event.ctrlKey || event.metaKey) return;
+    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeFilter(); }
+    else if (event.key === 'Enter') { event.preventDefault(); event.stopPropagation(); focusList(); openSelected(); }
+    else if (moves[event.key]) { event.preventDefault(); event.stopPropagation(); select(selectedIndex + moves[event.key]); }
+  }
+
+  function rowPointerDown(event: PointerEvent, row: PaneRow) {
+    // Only a real file or directory can be dragged; never the [..] action.
+    if (row.kind !== 'entry' || (row.entry.kind !== 'file' && row.entry.kind !== 'directory')) return;
+    if (event.button !== 0 || !event.isPrimary || (event.pointerType !== 'mouse' && event.pointerType !== 'pen')) return;
+    if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey || loading || editingPath) return;
+    const key = row.key;
+    ondragrequest({ event, entry: row.entry, select: () => {
+      const index = rows.findIndex((candidate) => candidate.key === key);
+      if (index < 0 || loading) return null;
+      select(index);
+      return operationSnapshot();
+    } });
   }
 
   function keydown(event: KeyboardEvent) {
@@ -305,18 +399,16 @@
       PageUp: () => select(selectedIndex - Math.max(1, Math.floor(height / rowHeight))),
       Enter: openSelected, Backspace: parent,
     };
+    if (filterOpen || filter) actions.Escape = closeFilter;
     if (actions[event.key]) { event.preventDefault(); event.stopPropagation(); actions[event.key](); }
   }
 </script>
 
-<section class={['pane', { active }]} aria-label={`${side} panel`} onfocusin={onactivate}>
-  <header class="pane-heading">
-    <div class="pane-label"><span class="pane-indicator"></span><h2>{side === 'left' ? 'Left panel' : 'Right panel'}</h2><span class="active-label">{active ? 'ACTIVE' : 'LOCAL'}</span></div>
-    <span class="location-label" title={listing?.label}>{listing ? 'Local filesystem' : 'Connecting to filesystem'}</span>
-  </header>
+<div class={['pane-view', { active, 'drop-valid': dropState === 'valid', 'drop-invalid': dropState === 'invalid' }]} id={`${viewId}-panel`} role="tabpanel" aria-labelledby={`${viewId}-tab`} hidden={!visible} data-drop-side={visible ? side : undefined}>
   <div class="navigation">
     <button class="icon-button" aria-label={`${side}: parent directory`} title="Parent directory (Backspace)" disabled={!listing?.parent} onclick={() => { parent(); focusList(); }}><Icon name="up" /></button>
     <button class="icon-button" aria-label={`${side}: home directory`} title="Home directory" onclick={() => { void navigate({ kind: 'home' }); focusList(); }}><Icon name="home" /></button>
+    <button class="icon-button" aria-label={`${side}: favorites`} title={`Favorites (${hints.openFavorites})`} onclick={onfavorites}><Icon name="star" /></button>
     <form class="path-form" onsubmit={submitPath}>
       <Icon name="folder" size={15} />
       <input bind:this={pathInput} bind:value={draft} oninput={() => { draftRevision++; editingPath = true; }} aria-label={`${side} directory path`} placeholder="Absolute directory path" spellcheck="false" autocomplete="off" title={draft}
@@ -339,6 +431,15 @@
     {/each}
     <span class="type-heading">Type</span>
   </div>
+  {#if filterOpen || filter}
+    <div class="filter-bar" role="search" aria-label={`${side} quick filter`}>
+      <Icon name="filter" size={14} />
+      <input bind:this={filterInput} value={filter} oninput={changeFilter} onkeydown={filterKeydown} aria-label={`${side} filter names`} placeholder="Filter names in this folder" spellcheck="false" autocomplete="off" title={`Quick Filter (${hints.quickFilter}) · Escape clears`} />
+      <span class="filter-count">{filter ? `${number.format(matched.length)} of ${number.format(entries.length)}` : ''}</span>
+      <!-- Pointer affordance only: Escape clears from the keyboard, so Tab goes from the filter straight to its list. -->
+      <button class="filter-clear" tabindex="-1" aria-label={`${side}: clear filter`} title="Clear filter (Escape)" onclick={closeFilter}>×</button>
+    </div>
+  {/if}
   {#if error}
     <div class="error-banner" role="alert">
       <Icon name="alert" />
@@ -348,7 +449,7 @@
         <div class="error-card" role="dialog" aria-label={`${side} error details`} tabindex="-1" onkeydown={errorDetailsKeydown}>
           <div class="metadata-heading"><span>DIRECTORY ERROR</span><button aria-label={`${side}: close error details`} onclick={closeErrorDetails}>×</button></div>
           <p>{error.message}</p>
-          {#if listing}<p class="error-location">Showing {listing.label}</p>{/if}
+          {#if listing}<p class="error-location">Showing {listing.label}</p>{:else if draft}<p class="error-location">Location {draft}</p>{/if}
         </div>
       </details>
       <button class="retry" onclick={retry}>Retry</button>
@@ -357,13 +458,13 @@
   {#if listing?.warnings.length}
     <div class="warning-banner" role="status">{listing.warnings.join(' · ')}</div>
   {/if}
-  <div class="file-list" bind:this={listElement} bind:clientHeight={height} role="listbox" aria-label={`${side} files`} aria-busy={loading} aria-activedescendant={activeDescendant} tabindex="0" onkeydown={keydown}
-    onscroll={() => { scrollTop = listElement.scrollTop; }}>
+  <div class="file-list" bind:this={listElement} bind:clientHeight={null, (value) => { if (value) height = value; }} role="listbox" aria-label={`${side} files`} aria-busy={loading} aria-activedescendant={activeDescendant} tabindex="0" onkeydown={keydown}
+    onscroll={() => { if (visible) scrollTop = listElement.scrollTop; }}>
     <div class="virtual-space" role="presentation" style:height={`${rows.length * rowHeight}px`}>
-      {#each visible as row, offset (row.key)}
+      {#each visibleRows as row, offset (row.key)}
         {@const index = start + offset}
-        <div id={`${side}-entry-${index}`} class={['file-row', { selected: index === selectedIndex, unavailable: row.kind === 'entry' && row.entry.kind === 'unknown' }]} role="option" aria-label={row.kind === 'parent' ? '[..] Parent directory' : undefined} aria-selected={index === selectedIndex} aria-posinset={index + 1} aria-setsize={rows.length} tabindex="-1" style:top={`${index * rowHeight}px`}
-          onclick={() => { select(index); focusList(); }} ondblclick={() => { select(index); openSelected(); }}
+        <div id={`${viewId}-entry-${index}`} class={['file-row', { selected: index === selectedIndex, unavailable: row.kind === 'entry' && row.entry.kind === 'unknown', dragging: row.kind === 'entry' && row.entry.path === draggingPath }]} role="option" aria-label={row.kind === 'parent' ? '[..] Parent directory' : undefined} aria-selected={index === selectedIndex} aria-posinset={index + 1} aria-setsize={rows.length} tabindex="-1" style:top={`${index * rowHeight}px`}
+          onclick={() => { select(index); focusList(); }} ondblclick={() => { select(index); openSelected(); }} onpointerdown={(event) => rowPointerDown(event, row)}
           onkeydown={keydown} title={row.kind === 'parent' ? 'Parent directory (Backspace)' : `${row.entry.name}${row.entry.metadataError ? `\n${row.entry.metadataError}` : ''}`}>
           {#if row.kind === 'parent'}
             <span class="entry-name"><span class="entry-icon directory"><Icon name="up" size={17} /></span><span class="filename">[..]</span></span>
@@ -380,13 +481,15 @@
     </div>
     {#if !loading && !error && entries.length === 0}
       <div class={['list-state', { 'with-parent': !!listing?.parent }]}><Icon name="folder" size={30} /><strong>This folder is empty</strong><span>Go up a level or browse another path.</span></div>
+    {:else if !loading && filter && matched.length === 0}
+      <div class={['list-state', { 'with-parent': !!listing?.parent }]} role="status"><Icon name="filter" size={30} /><strong>No names match “{filter}”</strong><span>Press Escape to clear the filter.</span></div>
     {:else if !loading && error && !listing}
       <div class="list-state"><Icon name="alert" size={30} /><strong>Directory unavailable</strong><span>Enter an absolute path above or try Home.</span></div>
     {/if}
   </div>
   {#if loading}<div class="loading-strip" role="status">{sorting ? 'Sorting…' : 'Reading directory…'}</div>{/if}
   <footer class="pane-status">
-    <span>{number.format(entries.length)} {entries.length === 1 ? 'item' : 'items'}<span class="status-divider">·</span>{number.format(folders)} {folders === 1 ? 'folder' : 'folders'}</span>
+    <span>{filter ? `${number.format(matched.length)} of ` : ''}{number.format(entries.length)} {entries.length === 1 ? 'item' : 'items'}<span class="status-divider">·</span>{number.format(folders)} {folders === 1 ? 'folder' : 'folders'}</span>
     <span class="selection-detail" title={selectedName}>{note || (selected?.kind === 'parent' ? 'Parent directory' : selectedEntry ? `${selectedEntry.name} · ${kindLabel[selectedEntry.kind]}` : 'No selection')}</span>
     <details class="selection-info" bind:open={detailsOpen}>
       <summary bind:this={detailsSummary} aria-label={`${side}: selection details`} title="Selection details (Alt+Enter)" onkeydown={(event) => { if (event.key === 'Escape') { event.preventDefault(); detailsOpen = false; focusList(); } }}><Icon name="info" size={16} /></summary>
@@ -403,19 +506,11 @@
       </div>
     </details>
   </footer>
-</section>
+</div>
 
 <style>
-  .pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--border); border-radius: 7px; overflow: hidden; position: relative; container-type: inline-size; }
-  .pane.active { border-color: var(--active-border); }
-  .pane-heading { height: 45px; flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 14px; border-bottom: 1px solid var(--border); background: var(--surface-raised); }
-  .pane-label { display: flex; align-items: center; gap: 9px; white-space: nowrap; }
-  h2 { margin: 0; font-size: 12px; font-weight: 600; }
-  .pane-indicator { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
-  .active .pane-indicator { background: var(--accent); }
-  .active-label { color: var(--muted); font-size: 9px; font-weight: 600; letter-spacing: .08em; }
-  .active .active-label { color: var(--accent); }
-  .location-label { color: var(--muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pane-view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .pane-view[hidden] { display: none; }
   .navigation { display: flex; align-items: center; gap: 3px; height: 51px; padding: 0 8px; flex-shrink: 0; border-bottom: 1px solid var(--border); }
   .icon-button { width: 29px; height: 29px; flex-shrink: 0; display: grid; place-items: center; color: var(--secondary); border-radius: 4px; }
   .path-form { min-width: 0; height: 30px; margin: 0 3px; display: flex; gap: 7px; align-items: center; flex: 1; background: var(--background); border: 1px solid var(--border); border-radius: 4px; padding-left: 9px; color: var(--muted); }
@@ -432,13 +527,20 @@
   .compact-sorting label { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
   .compact-sorting select { min-width: 0; flex: 1; border: 1px solid var(--border); border-radius: 3px; background: var(--background); color: var(--text); font: inherit; height: 25px; padding: 0 4px; }
   .sort-direction { flex-shrink: 0; width: 27px; height: 25px; color: var(--accent); border: 1px solid var(--border); border-radius: 3px; }
+  .filter-bar { height: 31px; flex-shrink: 0; display: flex; align-items: center; gap: 8px; padding: 0 6px 0 14px; border-bottom: 1px solid var(--border); background: var(--background); color: var(--accent); }
+  .filter-bar:focus-within { box-shadow: inset 0 -1px 0 var(--accent); }
+  .filter-count { color: var(--muted); font-size: 10px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .filter-clear { width: 24px; height: 24px; flex-shrink: 0; color: var(--secondary); border-radius: 3px; font-size: 15px; }
   .file-list { flex: 1; min-height: 0; overflow: auto; position: relative; scrollbar-gutter: stable; outline: none; }
   .file-list:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); }
+  .drop-valid .file-list { box-shadow: inset 0 0 0 2px var(--accent); background: var(--selection); }
+  .drop-invalid .file-list { box-shadow: inset 0 0 0 2px var(--warning); cursor: not-allowed; }
   .virtual-space { position: relative; }
   .file-row { position: absolute; width: 100%; height: 32px; font-size: 12px; user-select: none; border-left: 2px solid transparent; padding-left: 12px; cursor: default; }
   .file-row:hover { background: var(--hover); }
   .file-row.selected { background: var(--selection-inactive); border-left-color: var(--muted); }
   .active .file-row.selected { background: var(--selection); border-left-color: var(--accent); }
+  .file-row.dragging { opacity: .55; outline: 1px dashed var(--accent); outline-offset: -2px; }
   .entry-name { display: flex; align-items: center; gap: 9px; min-width: 0; }
   .filename { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .entry-icon { color: #8594a9; flex-shrink: 0; display: flex; }
@@ -468,7 +570,7 @@
   .metadata-error { color: var(--warning); overflow-wrap: anywhere; }
   .loading-strip { padding: 7px 14px; background: var(--selection); color: var(--accent); font-size: 11px; border-top: 1px solid var(--active-border); }
   .list-state { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 10px; color: var(--muted); text-align: center; padding: 20px; font-size: 11px; }
-  .list-state strong { color: var(--secondary); font-size: 13px; font-weight: 500; }
+  .list-state strong { color: var(--secondary); font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
   .list-state.with-parent { top: 32px; }
   .error-banner { display: flex; flex-shrink: 0; height: 40px; max-height: 40px; align-items: center; gap: 7px; margin: 4px 6px; padding: 4px 7px; border: 1px solid #6d443b; border-radius: 4px; color: var(--warning); background: #2c201e; font-size: 11px; }
   .error-preview { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 2px; }
@@ -484,16 +586,19 @@
   .error-card p { margin: 0 0 8px; }
   .error-location { color: var(--secondary); }
   .warning-banner { padding: 7px 14px; color: var(--warning); font-size: 11px; }
-  @container (max-width: 500px) { .columns, .file-row { grid-template-columns: minmax(90px, 1fr) 65px 100px; gap: 6px; padding-right: 9px; } .entry-type, .type-heading, .location-label { display: none; } }
+  @container (max-width: 500px) { .columns, .file-row { grid-template-columns: minmax(90px, 1fr) 65px 100px; gap: 6px; padding-right: 9px; } .entry-type, .type-heading { display: none; } }
   @container (max-width: 360px) {
     .file-row { grid-template-columns: minmax(75px, 1fr) 58px; }
     .columns { display: flex; padding: 0 9px; }
     .compact-sorting { display: flex; width: 100%; align-items: center; gap: 7px; }
     .column, .type-heading, .entry-date, .selection-detail { display: none; }
-    .active-label { font-size: 8px; }
-    .pane-heading { height: 36px; }
-    .navigation { height: 44px; }
+    .navigation { height: 44px; padding: 0 5px; gap: 1px; }
+    /* Four navigation buttons must still leave a usable path field. */
+    .icon-button { width: 25px; }
+    .path-form { padding-left: 6px; margin: 0 2px; }
+    .path-form > :global(svg) { display: none; }
     .list-state { padding: 8px; gap: 5px; }
     .list-state :global(svg) { display: none; }
+    .filter-count { display: none; }
   }
 </style>

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Linux/WSLg native checks against the already-built debug binary. The app and
-# Trash Portal share a disposable D-Bus session and XDG data directory. HOME and
-# the developer's existing session/Trash are never changed.
+# Trash Portal share a disposable D-Bus session and XDG data directory; settings
+# use a disposable XDG config directory. HOME and the developer's existing
+# session, Trash and QPanes settings are never changed.
 # Default: real Rust IPC with explicitly labeled DOM-dispatched UI input.
-# Optional: QPANES_NATIVE_PHASE=trash; QPANES_NATIVE_INPUT=xtest;
+# Optional: QPANES_NATIVE_PHASE=trash|history|hardening|usability; QPANES_NATIVE_INPUT=xtest;
 # QPANES_WSLG_POINTER=1; QPANES_NATIVE_PORT=9242.
 set -euo pipefail
 
@@ -17,6 +18,7 @@ if [[ "${1:-}" == --private-session ]]; then
   [[ -n "${QPANES_NATIVE_TRASH_ROOT:-}" &&
       "${QPANES_PRIVATE_NATIVE_SESSION:-}" == "$QPANES_NATIVE_TRASH_ROOT" &&
       "${XDG_DATA_HOME:-}" == "$QPANES_NATIVE_TRASH_ROOT/data" &&
+      "${XDG_CONFIG_HOME:-}" == "$QPANES_NATIVE_TRASH_ROOT/config" &&
       -f "$QPANES_NATIVE_TRASH_ROOT/qpanes-native-isolation" &&
       "$(cat -- "$QPANES_NATIVE_TRASH_ROOT/qpanes-native-isolation")" == 'QPanes disposable native Trash fixtures' &&
       -n "${DBUS_SESSION_BUS_ADDRESS:-}" &&
@@ -73,6 +75,9 @@ if [[ "${1:-}" == --private-session ]]; then
     node tests/native/history-invalidation.mjs
   elif [[ "${QPANES_NATIVE_PHASE:-all}" == hardening ]]; then
     node tests/native/hardening.mjs
+  elif [[ "${QPANES_NATIVE_PHASE:-all}" == usability ]]; then
+    # The suite closes this instance itself and relaunches to verify persistence.
+    node tests/native/slice004.mjs
   else
     if [[ "${QPANES_NATIVE_PHASE:-all}" != trash ]]; then node tests/native/smoke.mjs; fi
     node tests/native/operations.mjs
@@ -93,7 +98,7 @@ fi
 qpanes_fixture_root=$(mktemp -d "${TMPDIR:-/tmp}/qpanes-slice-002-native.XXXXXX")
 qpanes_marker="$qpanes_fixture_root/qpanes-native-isolation"
 printf 'QPanes disposable native Trash fixtures\n' >"$qpanes_marker"
-mkdir -p "$qpanes_fixture_root/data" test-results
+mkdir -p "$qpanes_fixture_root/data" "$qpanes_fixture_root/config" test-results
 cleanup_fixtures() {
   for qpanes_log in app.log portal-probe.log introspection.txt; do
     if [[ -f "$qpanes_fixture_root/$qpanes_log" ]]; then
@@ -114,6 +119,7 @@ export QPANES_NATIVE_TRASH_ROOT="$qpanes_fixture_root"
 export QPANES_PRIVATE_NATIVE_SESSION="$qpanes_fixture_root"
 export QPANES_NATIVE_PARENT_BUS="${DBUS_SESSION_BUS_ADDRESS:-}"
 export XDG_DATA_HOME="$qpanes_fixture_root/data"
+export XDG_CONFIG_HOME="$qpanes_fixture_root/config"
 export WEBKIT_INSPECTOR_HTTP_SERVER="127.0.0.1:$qpanes_native_port"
 export QPANES_INSPECTOR="http://127.0.0.1:$qpanes_native_port"
 export GDK_BACKEND=x11

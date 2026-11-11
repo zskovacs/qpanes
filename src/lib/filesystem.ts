@@ -13,7 +13,8 @@ export interface FileEntry {
 }
 export interface ListRequest { target: DirectoryTarget; sort: SortKey; direction: SortDirection }
 export interface DirectoryListing {
-  path: NativePath; label: string; parent: NativePath | null;
+  /** `label` is the full lossy display path; `name` its final component (or the root label). */
+  path: NativePath; label: string; name: string; parent: NativePath | null;
   entries: FileEntry[]; warnings: string[]; sort: SortKey; direction: SortDirection;
 }
 export interface FilesystemError { code: string; message: string; recovery?: NativePath | null }

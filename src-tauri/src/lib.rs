@@ -1,9 +1,71 @@
 use qpanes_core::operation_manager::{
     OperationJob, OperationManager, OperationSnapshot, ShutdownAttempt, SubmitRequest,
 };
+use qpanes_core::settings::{SettingsDocument, SettingsLoad, SettingsStatus};
 use qpanes_core::{DirectoryListing, Entry, FsError, ListRequest, SortDirection, SortKey};
 use serde::Deserialize;
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 use tauri::{Emitter, Manager, State};
+
+/// The app configuration directory and one lock serializing settings I/O.
+#[derive(Clone)]
+struct SettingsStore {
+    dir: Option<PathBuf>,
+    lock: Arc<Mutex<()>>,
+}
+
+#[tauri::command]
+async fn load_settings(store: State<'_, SettingsStore>) -> Result<SettingsLoad, FsError> {
+    let store = store.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = store
+            .lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match &store.dir {
+            Some(dir) => qpanes_core::settings::load_settings(dir),
+            None => SettingsLoad {
+                document: SettingsDocument::default(),
+                status: SettingsStatus::Unavailable,
+                warnings: vec![
+                    "The settings folder is unavailable. Changes will not be saved.".into(),
+                ],
+            },
+        }
+    })
+    .await
+    .map_err(|_| FsError::unavailable())
+}
+
+#[tauri::command]
+async fn save_settings(
+    store: State<'_, SettingsStore>,
+    document: SettingsDocument,
+) -> Result<(), FsError> {
+    let store = store.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = store
+            .lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = store.dir.as_deref().ok_or_else(FsError::unavailable)?;
+        qpanes_core::settings::save_settings(dir, &document)
+    })
+    .await
+    .map_err(|_| FsError::unavailable())?
+}
+
+#[tauri::command]
+async fn probe_directories(
+    paths: Vec<qpanes_core::NativePath>,
+) -> Result<Vec<qpanes_core::DirectoryStatus>, FsError> {
+    tauri::async_runtime::spawn_blocking(move || qpanes_core::probe_directories(&paths))
+        .await
+        .map_err(|_| FsError::unavailable())?
+}
 
 #[tauri::command]
 fn submit_operation(
@@ -120,6 +182,10 @@ pub fn run() {
                 let _ = handle.emit_to("main", "operations-changed", revision);
             })?;
             app.manage(manager);
+            app.manage(SettingsStore {
+                dir: app.path().app_config_dir().ok(),
+                lock: Arc::new(Mutex::new(())),
+            });
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -139,7 +205,10 @@ pub fn run() {
             retry_operation,
             dismiss_operation,
             shutdown_operations,
-            classify_operation_invalidation
+            classify_operation_invalidation,
+            load_settings,
+            save_settings,
+            probe_directories
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -218,6 +287,34 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn settings_and_probe_wire_names_match_renderer_contract() {
+        let load = qpanes_core::settings::SettingsLoad {
+            document: qpanes_core::settings::SettingsDocument::default(),
+            status: qpanes_core::settings::SettingsStatus::Unavailable,
+            warnings: vec![],
+        };
+        let value = serde_json::to_value(load).unwrap();
+        assert_eq!(value["status"], "unavailable");
+        assert_eq!(value["document"]["version"], 1);
+        assert!(value["document"]["session"].is_null());
+        assert_eq!(
+            serde_json::to_value(qpanes_core::DirectoryStatus::PermissionDenied).unwrap(),
+            "permissionDenied"
+        );
+        assert_eq!(
+            serde_json::to_value(qpanes_core::ErrorCode::InvalidSettings).unwrap(),
+            "invalidSettings"
+        );
+        let session = serde_json::json!({
+            "version": 1, "favorites": [], "shortcuts": {},
+            "session": { "activeSide": "left", "left": { "activeTab": 0, "tabs": [
+                { "path": null, "location": "", "name": "", "sort": "name", "direction": "ascending" }
+            ] }, "right": null }
+        });
+        assert!(serde_json::from_value::<super::SettingsDocument>(session).is_ok());
     }
 
     #[test]
